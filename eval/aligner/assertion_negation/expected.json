@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Login should be successful",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_text",
+      "target": "Login status",
+      "input_value": null,
+      "assertion": "Login successful",
+      "preconditions": null,
+      "raw_text": "Then login should be successful"
+    }
+  ]
+}

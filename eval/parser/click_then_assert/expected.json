@@ -1,0 +1,23 @@
+{
+  "scenario_title": "Login success display",
+  "steps": [
+    {
+      "index": 1,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Click the Login button and verify that Success is displayed."
+    },
+    {
+      "index": 2,
+      "action": "assert_text",
+      "target": null,
+      "input_value": null,
+      "assertion": "Success is displayed.",
+      "preconditions": null,
+      "raw_text": "Click the Login button and verify that Success is displayed."
+    }
+  ]
+}

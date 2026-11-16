@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Login with masked password",
+  "steps": [
+    {
+      "index": 1,
+      "action": "type_text",
+      "target": "Password field",
+      "input_value": "SuperSecretPassword!",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter password 'SuperSecretPassword!'"
+    }
+  ]
+}

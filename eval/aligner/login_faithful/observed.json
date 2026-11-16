@@ -1,0 +1,63 @@
+{
+  "source_file": "login_test_recording.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": 10000,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 1200,
+      "action": "navigate",
+      "target": "/login",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Login page is displayed with email and password fields visible",
+        "visible_text": null
+      },
+      "confidence": 0.97,
+      "screen_description": "Login page with email and password fields visible"
+    },
+    {
+      "index": 2,
+      "timestamp_ms": 3400,
+      "action": "type_text",
+      "target": "Email field",
+      "input_value": "testuser@example.invalid",
+      "assertion_evidence": null,
+      "confidence": 0.95,
+      "screen_description": "Email field contains 'testuser@example.invalid'"
+    },
+    {
+      "index": 3,
+      "timestamp_ms": 5100,
+      "action": "type_text",
+      "target": "Password field",
+      "input_value": "wrongpassword",
+      "assertion_evidence": null,
+      "confidence": 0.93,
+      "screen_description": "Password field filled, dots visible"
+    },
+    {
+      "index": 4,
+      "timestamp_ms": 6800,
+      "action": "click",
+      "target": "Sign in button",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Sign in button clicked"
+    },
+    {
+      "index": 5,
+      "timestamp_ms": 8200,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Error banner appeared on the login page",
+        "visible_text": "Invalid email or password"
+      },
+      "confidence": 0.96,
+      "screen_description": "User remains on /login, error banner visible with text 'Invalid email or password'"
+    }
+  ]
+}

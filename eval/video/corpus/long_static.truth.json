@@ -1,0 +1,20 @@
+{
+  "name": "long_static",
+  "note": "Eleven idle seconds must produce no events at all.",
+  "duration_ms": 14000,
+  "change_times_ms": [
+    11000
+  ],
+  "actions": [
+    {
+      "at_ms": 11000,
+      "action": "assert_visible",
+      "target": "banner",
+      "value": null,
+      "assertion": "Session expired"
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

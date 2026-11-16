@@ -1,0 +1,14 @@
+{
+  "scenario_title": "...",
+  "steps": [
+    {
+      "index": 1,
+      "action": "select",
+      "target": "Country dropdown",
+      "input_value": "India",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Select \"India\" from the Country dropdown."
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "scenario_title": "Invalid password login",
+  "steps": [
+    {
+      "index": 1,
+      "action": "navigate",
+      "target": "login page",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "the user is on the login page"
+    },
+    {
+      "index": 2,
+      "action": "type_text",
+      "target": "username",
+      "input_value": "tomsmith",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "the user enters \"tomsmith\" as the username"
+    },
+    {
+      "index": 3,
+      "action": "type_text",
+      "target": "password",
+      "input_value": "wrongpassword",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "the user enters \"wrongpassword\" as the password"
+    },
+    {
+      "index": 4,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "the user clicks the Login button"
+    },
+    {
+      "index": 5,
+      "action": "assert_text",
+      "target": null,
+      "input_value": null,
+      "assertion": "Your password is invalid!",
+      "preconditions": null,
+      "raw_text": "\"Your password is invalid!\" should be displayed"
+    }
+  ]
+}

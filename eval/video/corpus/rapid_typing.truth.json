@@ -1,0 +1,33 @@
+{
+  "name": "rapid_typing",
+  "note": "Keystroke burst that debouncing should collapse, not report 6 times.",
+  "duration_ms": 8000,
+  "change_times_ms": [
+    1500,
+    1750,
+    2000,
+    2250,
+    2500,
+    2750,
+    5500
+  ],
+  "actions": [
+    {
+      "at_ms": 1500,
+      "action": "type_text",
+      "target": "Username field",
+      "value": "t",
+      "assertion": null
+    },
+    {
+      "at_ms": 5500,
+      "action": "assert_visible",
+      "target": "banner",
+      "value": null,
+      "assertion": "Username taken"
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

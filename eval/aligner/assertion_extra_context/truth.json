@@ -1,0 +1,12 @@
+{
+  "case_id": "assertion_extra_context",
+  "polarity": "faithful",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": true,
+      "expected_finding_types": []
+    }
+  ],
+  "expected_case_findings": []
+}

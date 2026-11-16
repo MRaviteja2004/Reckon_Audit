@@ -1,0 +1,20 @@
+{
+  "source_file": "negation_test.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": 5000,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 2500,
+      "action": "assert_text",
+      "target": "Login status",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Login status message is visible",
+        "visible_text": "Login not successful"
+      },
+      "confidence": 0.98,
+      "screen_description": "The page displays 'Login not successful'"
+    }
+  ]
+}

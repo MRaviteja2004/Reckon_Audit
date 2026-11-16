@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Error assertion with harmless prefix",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion": "Invalid email or password",
+      "preconditions": null,
+      "raw_text": "Verify Invalid email or password"
+    }
+  ]
+}

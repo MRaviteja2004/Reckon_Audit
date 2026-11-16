@@ -1,0 +1,30 @@
+{
+  "case_id": "repeated_flow_with_unexpected_action",
+  "polarity": "broken",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 2,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 3,
+      "should_pass": true,
+      "expected_finding_types": []
+    }
+  ],
+  "expected_case_findings": [
+    "extra_action",
+    "extra_action",
+    "extra_action",
+    "extra_action",
+    "extra_action",
+    "extra_action",
+    "extra_action"
+  ]
+}

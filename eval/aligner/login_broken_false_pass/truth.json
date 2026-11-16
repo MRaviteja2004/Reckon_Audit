@@ -1,0 +1,36 @@
+{
+  "case_id": "login_broken_false_pass",
+  "polarity": "broken",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 2,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 3,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 4,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 5,
+      "should_pass": false,
+      "expected_finding_types": [
+        "missing_action"
+      ]
+    }
+  ],
+  "expected_case_findings": [
+    "extra_action"
+  ]
+}

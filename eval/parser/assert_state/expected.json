@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Verify Submit button disabled",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_state",
+      "target": "Submit button",
+      "input_value": null,
+      "assertion": "the Submit button is disabled.",
+      "preconditions": null,
+      "raw_text": "Verify that the Submit button is disabled."
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Generic qualified value",
+  "steps": [
+    {
+      "index": 1,
+      "action": "type_text",
+      "target": "username",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter an invalid username."
+    }
+  ]
+}

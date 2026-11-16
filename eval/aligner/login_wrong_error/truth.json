@@ -1,0 +1,13 @@
+{
+  "case_id": "login_wrong_error",
+  "polarity": "broken",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": false,
+      "expected_finding_types": [
+        "assertion_not_observed"
+      ]
+    }
+  ]
+}

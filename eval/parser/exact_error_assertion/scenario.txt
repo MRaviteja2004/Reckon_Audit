@@ -1,0 +1,1 @@
+Verify that "Your username is invalid!" is displayed.

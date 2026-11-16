@@ -1,0 +1,20 @@
+{
+  "source_file": "login_wrong_error.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": 5000,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 3000,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Error banner says Your password is invalid!",
+        "visible_text": "Your password is invalid!"
+      },
+      "confidence": 0.99,
+      "screen_description": "Login page showing password invalid error"
+    }
+  ]
+}

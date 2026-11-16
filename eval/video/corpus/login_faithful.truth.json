@@ -1,0 +1,68 @@
+{
+  "name": "login_faithful",
+  "note": "Happy path; the recording does demonstrate the scenario.",
+  "duration_ms": 9000,
+  "change_times_ms": [
+    1400,
+    2100,
+    2900,
+    3900,
+    4700,
+    5800,
+    7000
+  ],
+  "actions": [
+    {
+      "at_ms": 1400,
+      "action": "click",
+      "target": "Username field",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 2100,
+      "action": "type_text",
+      "target": "Username field",
+      "value": "tom",
+      "assertion": null
+    },
+    {
+      "at_ms": 2900,
+      "action": "type_text",
+      "target": "Username field",
+      "value": "tomsmith",
+      "assertion": null
+    },
+    {
+      "at_ms": 3900,
+      "action": "click",
+      "target": "Password field",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 4700,
+      "action": "type_text",
+      "target": "Password field",
+      "value": "SuperSecret!",
+      "assertion": null
+    },
+    {
+      "at_ms": 5800,
+      "action": "click",
+      "target": "Login button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 7000,
+      "action": "assert_visible",
+      "target": "success banner",
+      "value": null,
+      "assertion": "Welcome back, tomsmith!"
+    }
+  ],
+  "scenario": "1. Click the Username field and enter \"tomsmith\"\n2. Click the Password field and enter the password\n3. Click the Login button\n4. The message \"Welcome back, tomsmith!\" should be visible\n",
+  "expect_min_score": 0.8,
+  "expect_max_score": null
+}

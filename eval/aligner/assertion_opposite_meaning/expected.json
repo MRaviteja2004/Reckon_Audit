@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Login failure must not match login success",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_text",
+      "target": "Status message",
+      "input_value": null,
+      "assertion": "Login failed",
+      "preconditions": null,
+      "raw_text": "Verify login failed"
+    }
+  ]
+}

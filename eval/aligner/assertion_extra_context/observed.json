@@ -1,0 +1,20 @@
+{
+  "source_file": "assertion_extra_context.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": 5000,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 2000,
+      "action": "assert_visible",
+      "target": "Login page",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Login page is displayed with email and password fields visible",
+        "visible_text": null
+      },
+      "confidence": 0.99,
+      "screen_description": "Login page with email and password fields"
+    }
+  ]
+}

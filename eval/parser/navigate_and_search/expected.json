@@ -1,0 +1,32 @@
+{
+  "scenario_title": "Navigate and search",
+  "steps": [
+    {
+      "index": 1,
+      "action": "navigate",
+      "target": "search page",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Navigate to the search page, enter \"Reckon\" in the search field, and click the Search button."
+    },
+    {
+      "index": 2,
+      "action": "type_text",
+      "target": "search field",
+      "input_value": "Reckon",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Navigate to the search page, enter \"Reckon\" in the search field, and click the Search button."
+    },
+    {
+      "index": 3,
+      "action": "click",
+      "target": "Search button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Navigate to the search page, enter \"Reckon\" in the search field, and click the Search button."
+    }
+  ]
+}

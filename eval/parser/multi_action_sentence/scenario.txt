@@ -1,0 +1,1 @@
+Enter "tomsmith" as the username, enter "wrongpassword" as the password, and click the Login button.

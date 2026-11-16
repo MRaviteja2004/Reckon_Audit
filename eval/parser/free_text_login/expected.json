@@ -1,0 +1,41 @@
+{
+  "scenario_title": "Free text login",
+  "steps": [
+    {
+      "index": 1,
+      "action": "type_text",
+      "target": "username",
+      "input_value": "tomsmith",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter \"tomsmith\" as the username."
+    },
+    {
+      "index": 2,
+      "action": "type_text",
+      "target": "password",
+      "input_value": "wrongpassword",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter \"wrongpassword\" as the password."
+    },
+    {
+      "index": 3,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Click the Login button."
+    },
+    {
+      "index": 4,
+      "action": "assert_text",
+      "target": null,
+      "input_value": null,
+      "assertion": "Your password is invalid!",
+      "preconditions": null,
+      "raw_text": "Verify that \"Your password is invalid!\" is displayed."
+    }
+  ]
+}

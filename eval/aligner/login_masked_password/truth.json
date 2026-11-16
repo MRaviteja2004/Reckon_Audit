@@ -1,0 +1,11 @@
+{
+  "case_id": "login_masked_password",
+  "polarity": "faithful",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": true,
+      "expected_finding_types": []
+    }
+  ]
+}

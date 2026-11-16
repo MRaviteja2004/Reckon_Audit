@@ -1,0 +1,32 @@
+{
+  "scenario_title": "Multi action sentence",
+  "steps": [
+    {
+      "index": 1,
+      "action": "type_text",
+      "target": "username",
+      "input_value": "tomsmith",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter \"tomsmith\" as the username, enter \"wrongpassword\" as the password, and click the Login button."
+    },
+    {
+      "index": 2,
+      "action": "type_text",
+      "target": "password",
+      "input_value": "wrongpassword",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter \"tomsmith\" as the username, enter \"wrongpassword\" as the password, and click the Login button."
+    },
+    {
+      "index": 3,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter \"tomsmith\" as the username, enter \"wrongpassword\" as the password, and click the Login button."
+    }
+  ]
+}

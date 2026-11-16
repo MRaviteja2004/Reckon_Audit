@@ -1,0 +1,20 @@
+{
+  "name": "spinner_noise",
+  "note": "A spinner animates throughout; only the banner is a real event.",
+  "duration_ms": 10000,
+  "change_times_ms": [
+    6000
+  ],
+  "actions": [
+    {
+      "at_ms": 6000,
+      "action": "assert_visible",
+      "target": "banner",
+      "value": null,
+      "assertion": "Loaded 42 records"
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

@@ -1,0 +1,14 @@
+{
+  "case_id": "assertion_opposite_meaning",
+  "polarity": "broken",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": false,
+      "expected_finding_types": [
+        "assertion_not_observed"
+      ]
+    }
+  ],
+  "expected_case_findings": []
+}

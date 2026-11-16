@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Exact error assertion",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_text",
+      "target": null,
+      "input_value": null,
+      "assertion": "Your username is invalid!",
+      "preconditions": null,
+      "raw_text": "Verify that \"Your username is invalid!\" is displayed."
+    }
+  ]
+}

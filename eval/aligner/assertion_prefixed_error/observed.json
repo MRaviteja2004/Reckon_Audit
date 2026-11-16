@@ -1,0 +1,20 @@
+{
+  "source_file": "assertion_prefixed_error.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": 5000,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 2000,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Error banner is visible",
+        "visible_text": "Error: Invalid email or password"
+      },
+      "confidence": 0.99,
+      "screen_description": "Error banner displays Invalid email or password"
+    }
+  ]
+}

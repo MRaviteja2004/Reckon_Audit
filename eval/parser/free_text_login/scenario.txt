@@ -1,0 +1,1 @@
+Enter "tomsmith" as the username. Enter "wrongpassword" as the password. Click the Login button. Verify that "Your password is invalid!" is displayed.

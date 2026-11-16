@@ -1,0 +1,39 @@
+[project]
+name = "reckon"
+version = "0.1.0"
+description = "Recording Fidelity Audit — POC"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.10",
+    "instructor>=1.7",
+    "rapidfuzz>=3.12",
+    "streamlit>=1.45",
+    "av>=14.0",
+    "python-dotenv>=1.1",
+    "openai>=1.82",
+]
+
+[project.optional-dependencies]
+cross-check = [
+    "anthropic>=0.52",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "numpy>=2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reckon"]

@@ -1,0 +1,32 @@
+{
+  "scenario_title": "Repeated invalid login with unexpected action",
+  "steps": [
+    {
+      "index": 1,
+      "action": "type_text",
+      "target": "Username field",
+      "input_value": "tomsmith",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Enter username 'tomsmith'"
+    },
+    {
+      "index": 2,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Click Login"
+    },
+    {
+      "index": 3,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion": "Your password is invalid!",
+      "preconditions": null,
+      "raw_text": "Verify 'Your password is invalid!' appears"
+    }
+  ]
+}

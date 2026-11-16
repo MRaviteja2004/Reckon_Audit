@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Navigate to dashboard page",
+  "steps": [
+    {
+      "index": 1,
+      "action": "navigate",
+      "target": "dashboard page",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Navigate to the dashboard page."
+    }
+  ]
+}

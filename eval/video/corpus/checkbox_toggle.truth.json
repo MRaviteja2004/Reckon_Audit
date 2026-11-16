@@ -1,0 +1,28 @@
+{
+  "name": "checkbox_toggle",
+  "note": "A 26x26 px change on a 1920x1080 frame \u2014 the smallest real event.",
+  "duration_ms": 9000,
+  "change_times_ms": [
+    2500,
+    5500
+  ],
+  "actions": [
+    {
+      "at_ms": 2500,
+      "action": "click",
+      "target": "Remember me checkbox",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 5500,
+      "action": "click",
+      "target": "Remember me checkbox",
+      "value": null,
+      "assertion": null
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

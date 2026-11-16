@@ -1,0 +1,31 @@
+{
+  "case_id": "login_faithful",
+  "polarity": "faithful",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 2,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 3,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 4,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 5,
+      "should_pass": true,
+      "expected_finding_types": []
+    }
+  ]
+}

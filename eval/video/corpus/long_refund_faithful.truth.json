@@ -1,0 +1,172 @@
+{
+  "name": "long_refund_faithful",
+  "note": "90s, 5 pages, 22 actions; the recording matches the scenario.",
+  "duration_ms": 90000,
+  "change_times_ms": [
+    1800,
+    3200,
+    4600,
+    6400,
+    8000,
+    10200,
+    12400,
+    16000,
+    18500,
+    22000,
+    25500,
+    29000,
+    33000,
+    35500,
+    37500,
+    40000,
+    44000,
+    48000,
+    52000,
+    55000,
+    57500,
+    62000,
+    66500,
+    70000,
+    74000,
+    80000,
+    85000
+  ],
+  "actions": [
+    {
+      "at_ms": 1800,
+      "action": "click",
+      "target": "Email field",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 4600,
+      "action": "type_text",
+      "target": "Email field",
+      "value": "admin@shop.test",
+      "assertion": null
+    },
+    {
+      "at_ms": 6400,
+      "action": "click",
+      "target": "Password field",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 8000,
+      "action": "type_text",
+      "target": "Password field",
+      "value": "hunter2hunt",
+      "assertion": null
+    },
+    {
+      "at_ms": 10200,
+      "action": "click",
+      "target": "Sign in button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 12400,
+      "action": "assert_visible",
+      "target": "Dashboard",
+      "value": null,
+      "assertion": "Dashboard"
+    },
+    {
+      "at_ms": 18500,
+      "action": "click",
+      "target": "Orders tab",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 22000,
+      "action": "scroll",
+      "target": "orders list",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 25500,
+      "action": "scroll",
+      "target": "orders list",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 33000,
+      "action": "click",
+      "target": "Filter orders field",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 37500,
+      "action": "type_text",
+      "target": "Filter orders field",
+      "value": "4211",
+      "assertion": null
+    },
+    {
+      "at_ms": 40000,
+      "action": "click",
+      "target": "Search button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 48000,
+      "action": "click",
+      "target": "order #4211 row",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 52000,
+      "action": "click",
+      "target": "Refund amount field",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 57500,
+      "action": "type_text",
+      "target": "Refund amount field",
+      "value": "89.00",
+      "assertion": null
+    },
+    {
+      "at_ms": 62000,
+      "action": "click",
+      "target": "Issue refund button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 66500,
+      "action": "click",
+      "target": "Confirm button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 74000,
+      "action": "assert_visible",
+      "target": "confirmation banner",
+      "value": null,
+      "assertion": "Refund issued"
+    },
+    {
+      "at_ms": 80000,
+      "action": "click",
+      "target": "Orders tab",
+      "value": null,
+      "assertion": null
+    }
+  ],
+  "scenario": "1. Enter \"admin@shop.test\" in the Email field\n2. Enter the password\n3. Click the Sign in button\n4. The Dashboard should be visible\n5. Click the Orders tab\n6. Scroll down the orders list\n7. Enter \"4211\" in the Filter orders field\n8. Click the Search button\n9. Open order #4211\n10. Enter \"89.00\" in the Refund amount field\n11. Click the Issue refund button\n12. Click the Confirm button in the dialog\n13. A confirmation reading \"Refund issued\" should be visible\n",
+  "expect_min_score": 0.8,
+  "expect_max_score": null
+}

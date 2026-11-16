@@ -1,0 +1,1 @@
+Click the Login button and verify that Success is displayed.

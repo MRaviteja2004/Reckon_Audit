@@ -1,0 +1,133 @@
+{
+  "source_file": "recording.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": null,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 2000,
+      "action": "click",
+      "target": "Username input field",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Login page with Username and Password fields."
+    },
+    {
+      "index": 2,
+      "timestamp_ms": 2500,
+      "action": "type_text",
+      "target": "Username input field",
+      "input_value": "tomsmith",
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Typing 'tomsmith' into the Username field."
+    },
+    {
+      "index": 3,
+      "timestamp_ms": 3200,
+      "action": "click",
+      "target": "Password input field",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Username entered, clicking the Password field."
+    },
+    {
+      "index": 4,
+      "timestamp_ms": 3800,
+      "action": "type_text",
+      "target": "Password input field",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Typing an obscured password into the Password field."
+    },
+    {
+      "index": 5,
+      "timestamp_ms": 5000,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Clicking the Login button to submit the form."
+    },
+    {
+      "index": 6,
+      "timestamp_ms": 6000,
+      "action": "assert_visible",
+      "target": "Error message banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Red error banner appearing at the top of the content area.",
+        "visible_text": "Your password is invalid!"
+      },
+      "confidence": 1.0,
+      "screen_description": "Page reloaded, showing an error indicating an invalid password."
+    },
+    {
+      "index": 7,
+      "timestamp_ms": 10200,
+      "action": "click",
+      "target": "Username input field",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Clicking the Username input field again."
+    },
+    {
+      "index": 8,
+      "timestamp_ms": 10800,
+      "action": "type_text",
+      "target": "Username input field",
+      "input_value": "dasfdjhasdfhkad",
+      "assertion_evidence": null,
+      "confidence": 0.9,
+      "screen_description": "Typing a long string of random characters into the Username field."
+    },
+    {
+      "index": 9,
+      "timestamp_ms": 12800,
+      "action": "click",
+      "target": "Password input field",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Clicking the Password field."
+    },
+    {
+      "index": 10,
+      "timestamp_ms": 13500,
+      "action": "type_text",
+      "target": "Password input field",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Typing an obscured string into the Password field."
+    },
+    {
+      "index": 11,
+      "timestamp_ms": 15100,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 1.0,
+      "screen_description": "Clicking the Login button for the second time."
+    },
+    {
+      "index": 12,
+      "timestamp_ms": 16000,
+      "action": "assert_visible",
+      "target": "Error message banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Red error banner appearing at the top of the content area.",
+        "visible_text": "Your username is invalid!"
+      },
+      "confidence": 1.0,
+      "screen_description": "Page reloaded, showing an error indicating an invalid username."
+    }
+  ]
+}

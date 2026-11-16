@@ -1,0 +1,29 @@
+{
+  "name": "transient_toast",
+  "note": "The toast is visible for 450 ms \u2014 near the 250 ms sampling interval.",
+  "duration_ms": 9000,
+  "change_times_ms": [
+    2000,
+    2450,
+    5000
+  ],
+  "actions": [
+    {
+      "at_ms": 2000,
+      "action": "assert_visible",
+      "target": "toast",
+      "value": null,
+      "assertion": "Draft saved"
+    },
+    {
+      "at_ms": 5000,
+      "action": "click",
+      "target": "Remember me checkbox",
+      "value": null,
+      "assertion": null
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

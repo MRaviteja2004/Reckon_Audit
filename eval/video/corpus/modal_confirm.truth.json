@@ -1,0 +1,36 @@
+{
+  "name": "modal_confirm",
+  "note": "Large overlay appearing and clearing.",
+  "duration_ms": 10000,
+  "change_times_ms": [
+    1800,
+    4200,
+    6000
+  ],
+  "actions": [
+    {
+      "at_ms": 1800,
+      "action": "click",
+      "target": "Delete button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 4200,
+      "action": "click",
+      "target": "Confirm button",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 6000,
+      "action": "assert_visible",
+      "target": "banner",
+      "value": null,
+      "assertion": "Account deleted"
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

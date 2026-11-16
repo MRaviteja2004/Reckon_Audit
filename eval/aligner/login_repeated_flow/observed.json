@@ -1,0 +1,108 @@
+{
+  "source_file": "login_repeated_flow.mp4",
+  "clip_offset_ms": 0,
+  "clip_end_ms": 15000,
+  "actions": [
+    {
+      "index": 1,
+      "timestamp_ms": 1000,
+      "action": "type_text",
+      "target": "Username field",
+      "input_value": "tomsmith",
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Username entered"
+    },
+    {
+      "index": 2,
+      "timestamp_ms": 2000,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Login clicked"
+    },
+    {
+      "index": 3,
+      "timestamp_ms": 3000,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Password invalid error displayed",
+        "visible_text": "Your password is invalid!"
+      },
+      "confidence": 0.99,
+      "screen_description": "Password invalid error visible"
+    },
+
+    {
+      "index": 4,
+      "timestamp_ms": 5000,
+      "action": "type_text",
+      "target": "Username field",
+      "input_value": "tomsmith",
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Username entered again"
+    },
+    {
+      "index": 5,
+      "timestamp_ms": 6000,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Login clicked again"
+    },
+    {
+      "index": 6,
+      "timestamp_ms": 7000,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Password invalid error displayed",
+        "visible_text": "Your password is invalid!"
+      },
+      "confidence": 0.99,
+      "screen_description": "Password invalid error visible"
+    },
+
+    {
+      "index": 7,
+      "timestamp_ms": 9000,
+      "action": "type_text",
+      "target": "Username field",
+      "input_value": "tomsmith",
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Username entered a third time"
+    },
+    {
+      "index": 8,
+      "timestamp_ms": 10000,
+      "action": "click",
+      "target": "Login button",
+      "input_value": null,
+      "assertion_evidence": null,
+      "confidence": 0.98,
+      "screen_description": "Login clicked a third time"
+    },
+    {
+      "index": 9,
+      "timestamp_ms": 11000,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion_evidence": {
+        "description": "Password invalid error displayed",
+        "visible_text": "Your password is invalid!"
+      },
+      "confidence": 0.99,
+      "screen_description": "Password invalid error visible"
+    }
+  ]
+}

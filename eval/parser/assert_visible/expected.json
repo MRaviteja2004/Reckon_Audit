@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Verify that the dashboard is visible.",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_visible",
+      "target": "dashboard",
+      "input_value": null,
+      "assertion": "the dashboard is visible.",
+      "preconditions": null,
+      "raw_text": "Verify that the dashboard is visible."
+    }
+  ]
+}

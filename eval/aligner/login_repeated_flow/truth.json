@@ -1,0 +1,22 @@
+{
+  "case_id": "login_repeated_flow",
+  "polarity": "faithful",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 2,
+      "should_pass": true,
+      "expected_finding_types": []
+    },
+    {
+      "index": 3,
+      "should_pass": true,
+      "expected_finding_types": []
+    }
+  ],
+   "expected_case_findings": []
+}

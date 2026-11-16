@@ -1,0 +1,50 @@
+{
+  "scenario_title": "Login with invalid password shows error message",
+  "steps": [
+    {
+      "index": 1,
+      "action": "navigate",
+      "target": "/login",
+      "input_value": null,
+      "assertion": "Login page is displayed",
+      "preconditions": "User is logged out",
+      "raw_text": "Given the user is on the login page"
+    },
+    {
+      "index": 2,
+      "action": "type_text",
+      "target": "Email field",
+      "input_value": "testuser@example.invalid",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "When the user enters 'testuser@example.invalid' in the email field"
+    },
+    {
+      "index": 3,
+      "action": "type_text",
+      "target": "Password field",
+      "input_value": "wrongpassword",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "And enters 'wrongpassword' in the password field"
+    },
+    {
+      "index": 4,
+      "action": "click",
+      "target": "Sign in button",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "And clicks the Sign in button"
+    },
+    {
+      "index": 5,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion": "Invalid email or password",
+      "preconditions": null,
+      "raw_text": "Then an error message 'Invalid email or password' should be visible"
+    }
+  ]
+}

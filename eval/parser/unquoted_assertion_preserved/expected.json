@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Unquoted assertion preserved",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_text",
+      "target": null,
+      "input_value": null,
+      "assertion": "Invalid username is displayed.",
+      "preconditions": null,
+      "raw_text": "Verify that Invalid username is displayed."
+    }
+  ]
+}

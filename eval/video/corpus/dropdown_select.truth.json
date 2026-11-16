@@ -1,0 +1,36 @@
+{
+  "name": "dropdown_select",
+  "note": "Option list opening, then a selected value.",
+  "duration_ms": 10000,
+  "change_times_ms": [
+    1900,
+    4100,
+    6500
+  ],
+  "actions": [
+    {
+      "at_ms": 1900,
+      "action": "click",
+      "target": "Country dropdown",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 4100,
+      "action": "select",
+      "target": "Country dropdown",
+      "value": "Germany",
+      "assertion": null
+    },
+    {
+      "at_ms": 6500,
+      "action": "click",
+      "target": "Remember me checkbox",
+      "value": null,
+      "assertion": null
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}

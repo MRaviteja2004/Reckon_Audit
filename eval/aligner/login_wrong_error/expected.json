@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Invalid username shows username error",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_text",
+      "target": "Error banner",
+      "input_value": null,
+      "assertion": "Your username is invalid!",
+      "preconditions": null,
+      "raw_text": "Then the message 'Your username is invalid!' should appear"
+    }
+  ]
+}

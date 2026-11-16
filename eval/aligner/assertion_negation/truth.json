@@ -1,0 +1,13 @@
+{
+  "case_id": "assertion_negation",
+  "polarity": "broken",
+  "steps": [
+    {
+      "index": 1,
+      "should_pass": false,
+      "expected_finding_types": [
+        "assertion_not_observed"
+      ]
+    }
+  ]
+}

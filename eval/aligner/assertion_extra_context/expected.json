@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Login page assertion with extra observed context",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_visible",
+      "target": "Login page",
+      "input_value": null,
+      "assertion": "Login page is displayed",
+      "preconditions": null,
+      "raw_text": "Verify the login page is displayed"
+    }
+  ]
+}

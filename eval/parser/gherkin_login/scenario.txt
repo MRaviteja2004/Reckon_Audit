@@ -1,0 +1,8 @@
+Feature: Login
+
+Scenario: Invalid password login
+Given the user is on the login page
+When the user enters "tomsmith" as the username
+And the user enters "wrongpassword" as the password
+And the user clicks the Login button
+Then "Your password is invalid!" should be displayed

@@ -1,0 +1,25 @@
+# Environment & secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Streamlit
+.streamlit/
+
+# Media / uploads (potentially large or sensitive)
+uploads/
+*.mp4
+*.mov
+*.avi
+
+*.log
+
+# macOS
+.DS_Store

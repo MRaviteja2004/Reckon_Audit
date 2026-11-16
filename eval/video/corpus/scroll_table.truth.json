@@ -1,0 +1,36 @@
+{
+  "name": "scroll_table",
+  "note": "Scrolling is the weakest case for discrete frames \u2014 tested honestly.",
+  "duration_ms": 11000,
+  "change_times_ms": [
+    2000,
+    4000,
+    6500
+  ],
+  "actions": [
+    {
+      "at_ms": 2000,
+      "action": "scroll",
+      "target": "orders table",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 4000,
+      "action": "scroll",
+      "target": "orders table",
+      "value": null,
+      "assertion": null
+    },
+    {
+      "at_ms": 6500,
+      "action": "scroll",
+      "target": "orders table",
+      "value": null,
+      "assertion": null
+    }
+  ],
+  "scenario": null,
+  "expect_min_score": null,
+  "expect_max_score": null
+}
