@@ -12,6 +12,7 @@ from reckon.tolerance import (
     FUZZY_THRESHOLD,
     actions_compatible,
     assertion_satisfied,
+    assertion_target_relevant,
     finding_severity,
     focus_click_evidence,
     values_equivalent,
@@ -56,6 +57,247 @@ def test_assertion_satisfied_false_when_text_is_unrelated():
     assert not assertion_satisfied("Invalid email or password", obs)
 
 
+def test_assertion_rejects_carousel_via_menu_label_visible_text():
+    """Sheet/menu chrome must not prove a named carousel via shared label text."""
+    ev = AssertionEvidence(
+        description="Options bottom sheet",
+        visible_text="Mentorship settings\nHow it works\nLanguage\nDelete",
+    )
+    obs = _obs(78, ActionType.assert_visible, "Options bottom sheet", evidence=ev)
+    assert not assertion_target_relevant("How it works carousel", obs)
+    assert not assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works carousel",
+    )
+
+
+def test_assertion_accepts_matching_carousel_with_text():
+    ev = AssertionEvidence(
+        description="How it works carousel page",
+        visible_text="How it works\nSwipe to learn more",
+    )
+    obs = _obs(12, ActionType.assert_visible, "How it works carousel", evidence=ev)
+    assert assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works carousel",
+    )
+
+
+def test_assertion_accepts_carousel_target_synonym():
+    """carousel ↔ slider is a configured component-role alias."""
+    ev = AssertionEvidence(
+        description="Onboarding slider showing How it works",
+        visible_text="How it works",
+    )
+    obs = _obs(12, ActionType.assert_visible, "How it works slider", evidence=ev)
+    assert assertion_target_relevant("How it works carousel", obs)
+    assert assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works carousel",
+    )
+
+
+def test_mentorship_title_not_proved_by_join_mentorship_button():
+    """E29: language-form Join Mentorship must not clear Mentorship title."""
+    ev = AssertionEvidence(
+        description="Join Mentorship button becomes enabled after agreeing to terms",
+        visible_text="Join Mentorship",
+    )
+    obs = ObservedAction(
+        index=58,
+        action=ActionType.assert_state,
+        target="Join Mentorship button",
+        timestamp_ms=189513,
+        assertion_evidence=ev,
+        confidence=0.85,
+        screen_description="Join Mentorship button changed from disabled grey to enabled black",
+    )
+    assert not assertion_target_relevant("Mentorship title", obs)
+    assert not assertion_satisfied(
+        "Mentorship",
+        obs,
+        expected_target="Mentorship title",
+    )
+
+
+def test_mentorship_title_accepts_dashboard_title_evidence():
+    """Legitimate Mentorship title on the dashboard still passes."""
+    ev = AssertionEvidence(
+        description="Dashboard header title",
+        visible_text="Mentorship",
+    )
+    obs = ObservedAction(
+        index=70,
+        action=ActionType.assert_visible,
+        target="Mentorship title",
+        timestamp_ms=240750,
+        assertion_evidence=ev,
+        confidence=0.9,
+        screen_description="Mentor Dashboard empty state / Mentorship page",
+    )
+    assert assertion_target_relevant("Mentorship title", obs)
+    assert assertion_satisfied(
+        "Mentorship",
+        obs,
+        expected_target="Mentorship title",
+    )
+
+
+def test_dashboard_cta_not_proved_by_carousel_page():
+    """E32: How it works onboarding page must not clear dashboard CTA."""
+    ev = AssertionEvidence(
+        description="Onboarding page title and pager indicator",
+        visible_text="How it works ... 1 of 6",
+    )
+    obs = ObservedAction(
+        index=64,
+        action=ActionType.assert_visible,
+        target="How it works page",
+        timestamp_ms=213765,
+        assertion_evidence=ev,
+        confidence=0.85,
+    )
+    assert not assertion_target_relevant("How it works CTA", obs)
+    assert not assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works CTA",
+    )
+
+
+def test_menu_option_not_proved_by_carousel_page():
+    """E39: carousel page must not clear How it works menu option."""
+    ev = AssertionEvidence(
+        description="Onboarding page title and pager indicator",
+        visible_text="How it works ... 1 of 6",
+    )
+    obs = ObservedAction(
+        index=64,
+        action=ActionType.assert_visible,
+        target="How it works page",
+        timestamp_ms=213765,
+        assertion_evidence=ev,
+        confidence=0.85,
+    )
+    assert not assertion_target_relevant("How it works option", obs)
+    assert not assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works option",
+    )
+
+
+def test_menu_option_accepts_action_sheet_evidence():
+    """Legitimate How it works option on the Mentorship action sheet still passes."""
+    ev = AssertionEvidence(
+        description="Bottom sheet with options shown",
+        visible_text="Mentorship settings, How it works, Past learners, Cancel",
+    )
+    obs = ObservedAction(
+        index=79,
+        action=ActionType.assert_visible,
+        target="Action sheet menu",
+        timestamp_ms=283753,
+        assertion_evidence=ev,
+        confidence=0.9,
+        screen_description="Mentorship page dimmed with bottom action sheet",
+    )
+    assert assertion_target_relevant("How it works option", obs)
+    assert assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works option",
+    )
+
+
+def test_dashboard_cta_accepts_dashboard_button_evidence():
+    """Legitimate How it works CTA on the Mentor Dashboard still passes."""
+    ev = AssertionEvidence(
+        description="Dashboard CTA",
+        visible_text="How it works",
+    )
+    obs = ObservedAction(
+        index=71,
+        action=ActionType.assert_visible,
+        target="How it works button",
+        timestamp_ms=240800,
+        assertion_evidence=ev,
+        confidence=0.9,
+        screen_description="Mentor Dashboard",
+    )
+    assert assertion_target_relevant("How it works CTA", obs)
+    assert assertion_satisfied(
+        "How it works",
+        obs,
+        expected_target="How it works CTA",
+    )
+
+
+def test_background_check_screen_landing_assertion_passes_with_identity_evidence():
+    """Land-on-screen claims may use structured screen identity without boilerplate OCR."""
+    ev = AssertionEvidence(
+        description="Background check page asking for SSN",
+        visible_text="Background check",
+    )
+    obs = ObservedAction(
+        index=30,
+        action=ActionType.assert_visible,
+        target="Background check page",
+        timestamp_ms=51266,
+        assertion_evidence=ev,
+        confidence=0.85,
+        screen_description="SSN field and 'I agree and acknowledge' button",
+    )
+    assert assertion_satisfied(
+        "User should land on Background check screen.",
+        obs,
+        expected_target="Background check screen",
+    )
+
+
+def test_screen_landing_assertion_rejects_different_screen_identity():
+    ev = AssertionEvidence(
+        description="Vehicle information form",
+        visible_text="Add your vehicle",
+    )
+    obs = ObservedAction(
+        index=40,
+        action=ActionType.assert_visible,
+        target="Vehicle information page",
+        timestamp_ms=60000,
+        assertion_evidence=ev,
+        confidence=0.85,
+    )
+    assert not assertion_satisfied(
+        "User should land on Background check screen.",
+        obs,
+        expected_target="Background check screen",
+    )
+
+
+def test_non_landing_assertion_still_requires_full_token_containment():
+    """Screen-identity shortcut must not weaken ordinary outcome assertions."""
+    ev = AssertionEvidence(
+        description="Background check page asking for SSN",
+        visible_text="Background check",
+    )
+    obs = ObservedAction(
+        index=30,
+        action=ActionType.assert_visible,
+        target="Background check page",
+        timestamp_ms=51266,
+        assertion_evidence=ev,
+        confidence=0.85,
+    )
+    assert not assertion_satisfied(
+        "Background check passed successfully",
+        obs,
+        expected_target="Background check screen",
+    )
+
 
 # ---------------------------------------------------------------------------
 # actions_compatible
@@ -75,6 +317,36 @@ def test_actions_compatible_rejects_unrelated_types():
 
 def test_actions_compatible_rejects_assertion_paired_with_action():
     assert not actions_compatible(ActionType.assert_visible, ActionType.click)
+
+
+def test_actions_compatible_click_and_select_strict_by_default():
+    assert not actions_compatible(ActionType.select, ActionType.click)
+    assert not actions_compatible(ActionType.click, ActionType.select)
+
+
+def test_actions_compatible_click_select_opt_in_for_choice_controls():
+    assert actions_compatible(
+        ActionType.select,
+        ActionType.click,
+        allow_choice_control=True,
+        expected_target="Language dropdown",
+        observed_target="English checkbox",
+    )
+    # One-sided choice control is not enough — both sides must denote choice UI.
+    assert not actions_compatible(
+        ActionType.select,
+        ActionType.click,
+        allow_choice_control=True,
+        expected_target="Language",
+        observed_target="English checkbox",
+    )
+    assert not actions_compatible(
+        ActionType.select,
+        ActionType.click,
+        allow_choice_control=True,
+        expected_target="Language dropdown",
+        observed_target="Submit button",
+    )
 
 
 # ---------------------------------------------------------------------------

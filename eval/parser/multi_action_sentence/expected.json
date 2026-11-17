@@ -8,7 +8,7 @@
       "input_value": "tomsmith",
       "assertion": null,
       "preconditions": null,
-      "raw_text": "Enter \"tomsmith\" as the username, enter \"wrongpassword\" as the password, and click the Login button."
+      "raw_text": "Enter \"tomsmith\" as the username"
     },
     {
       "index": 2,
@@ -17,7 +17,7 @@
       "input_value": "wrongpassword",
       "assertion": null,
       "preconditions": null,
-      "raw_text": "Enter \"tomsmith\" as the username, enter \"wrongpassword\" as the password, and click the Login button."
+      "raw_text": "enter \"wrongpassword\" as the password"
     },
     {
       "index": 3,
@@ -26,7 +26,7 @@
       "input_value": null,
       "assertion": null,
       "preconditions": null,
-      "raw_text": "Enter \"tomsmith\" as the username, enter \"wrongpassword\" as the password, and click the Login button."
+      "raw_text": "click the Login button."
     }
   ]
 }

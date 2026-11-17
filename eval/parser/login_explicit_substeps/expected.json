@@ -1,0 +1,32 @@
+{
+  "scenario_title": "Explicit login substeps",
+  "steps": [
+    {
+      "index": 1,
+      "action": "type_text",
+      "target": "password",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "1. Enter the password."
+    },
+    {
+      "index": 2,
+      "action": "click",
+      "target": "Next",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "2. Tap Next to log in."
+    },
+    {
+      "index": 3,
+      "action": "assert_visible",
+      "target": "home screen",
+      "input_value": null,
+      "assertion": "the home screen is displayed.",
+      "preconditions": null,
+      "raw_text": "3. Verify that the home screen is displayed."
+    }
+  ]
+}

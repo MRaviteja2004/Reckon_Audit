@@ -34,11 +34,12 @@ from reckon.latency import (
 )
 from reckon.parser import make_openai_client
 from reckon.retry import RetryCallback, call_with_retry
+from reckon.equivalence.citations import bind_observed_interaction
 from reckon.schema import ActionType, AssertionEvidence, ObservedAction, ObservedTrace
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "gpt-5.5")
+EXTRACTION_MODEL = os.environ.get("EXTRACTION_MODEL", "claude-opus-5-5")
 
 # Frames are sent at "high" detail: the audit turns on reading error banners, toast
 # text, and field values, which low detail renders illegible.
@@ -49,8 +50,8 @@ _DETAIL_LEVELS = frozenset({"low", "high", "auto"})
 # so the extra pixels cost upload time and buy nothing.
 MAX_FRAME_DIMENSION = 1536
 
-# temperature is omitted (never sent): determinism is the goal, but the GPT-5 family
-# accepts only its default temperature and rejects any explicit value.
+# temperature is omitted (never sent): determinism is the goal, but some gateway models
+# accept only their default temperature and reject any explicit value.
 
 EXTRACTION_SYSTEM = """\
 You are reading frames from a UI test recording. The frames are stills captured at the \
@@ -74,7 +75,10 @@ in addition to whatever click preceded it. A click and the outcome it produced a
 separate observations, and folding the outcome into the click loses it.
 - Do not open with a navigate action invented to describe the first frame. Report a \
 navigate only when you can see the page actually change to a new one.
-- Set confidence to reflect how certain you are the action occurred as described.\
+- Set confidence to reflect how certain you are the action occurred as described.
+- Optional interaction: operation, kind, kind_text, name, product, instance, and \
+value. Cite those strings from exactly one of target, input_value, or visible_text. \
+Do not cite screen_description. Leave interaction empty when you cannot.\
 """
 
 
@@ -97,6 +101,15 @@ class _ExtractedAction(BaseModel):
         None,
         description="Brief description of the screen state in this frame",
     )
+    interaction_operation: str | None = None
+    interaction_operation_text: str | None = None
+    interaction_kind: str | None = None
+    interaction_kind_text: str | None = None
+    interaction_name: str | None = None
+    interaction_product: str | None = None
+    interaction_instance: str | None = None
+    interaction_value: str | None = None
+    interaction_surface: str | None = None
 
 
 class _ExtractedActions(BaseModel):
@@ -156,6 +169,36 @@ def _resolve_frame_index(frame_index: int, frame_count: int) -> int:
     return max(1, min(frame_index, frame_count))
 
 
+def _interaction_for_report(reported: _ExtractedAction, frame_index: int):
+    """Bind a reported interaction to one stored surface, or drop it."""
+    if not reported.interaction_operation or not reported.interaction_kind or not reported.interaction_kind_text:
+        return None
+    surface = reported.interaction_surface
+    if surface == "target":
+        text = reported.target
+    elif surface == "input_value":
+        text = reported.input_value
+    elif surface == "visible_text" and reported.assertion_evidence is not None:
+        text = reported.assertion_evidence.visible_text
+    else:
+        return None
+    if not text:
+        return None
+    return bind_observed_interaction(
+        surface_text=text,
+        surface=surface,
+        operation=reported.interaction_operation,
+        operation_text=reported.interaction_operation_text,
+        kind=reported.interaction_kind,
+        kind_text=reported.interaction_kind_text,
+        cited_frame_index=frame_index,
+        name=reported.interaction_name,
+        product=reported.interaction_product,
+        instance=reported.interaction_instance,
+        value=reported.interaction_value,
+    )
+
+
 def extract_window(
     openai_client: instructor.Instructor,
     video_path: Path,
@@ -212,21 +255,20 @@ def extract_window(
     extracted = _call_with_retry(openai_client, model, content, on_retry)
 
     sample_timestamps = [ts for ts, _ in samples]
-    actions = [
-        ObservedAction(
+    actions = []
+    for index, reported in enumerate(extracted.actions, start=1):
+        frame_index = _resolve_frame_index(reported.frame_index, len(sample_timestamps))
+        actions.append(ObservedAction(
             index=index,
-            timestamp_ms=sample_timestamps[
-                _resolve_frame_index(reported.frame_index, len(sample_timestamps)) - 1
-            ] - clip_offset_ms,
+            timestamp_ms=sample_timestamps[frame_index - 1] - clip_offset_ms,
             action=reported.action,
             target=reported.target,
             input_value=reported.input_value,
             assertion_evidence=reported.assertion_evidence,
             confidence=reported.confidence,
             screen_description=reported.screen_description,
-        )
-        for index, reported in enumerate(extracted.actions, start=1)
-    ]
+            interaction=_interaction_for_report(reported, frame_index),
+        ))
 
     if latency is not None:
         frame_count = len(samples)

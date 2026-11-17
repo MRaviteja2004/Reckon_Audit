@@ -176,6 +176,139 @@ def test_target_similarity_does_not_equate_structural_words_alone(
     assert _target_similarity(expected_target, observed_target) < FUZZY_THRESHOLD
 
 
+@pytest.mark.parametrize(
+    ("expected_target", "observed_target"),
+    [
+        ("Next", "Next button"),
+        ("Login", "Login button"),
+        ("Save", "Save button"),
+        ("Next", "Next btn"),
+        ("Continue", "Continue button"),
+        ("Sign in", "Sign in button"),
+    ],
+)
+def test_target_similarity_control_chrome_equality(
+    expected_target: str,
+    observed_target: str,
+):
+    """Bare CTA labels match the same label with button/btn chrome exactly."""
+    assert _target_similarity(expected_target, observed_target) == 100.0
+    assert _target_similarity(observed_target, expected_target) == 100.0
+
+
+def test_chrome_equality_requires_non_empty_meaningful_tokens():
+    """Pure chrome labels must not get chrome-equivalence 100.0."""
+    assert _target_similarity("button", "btn") != 100.0
+    assert _target_similarity("btn", "button") != 100.0
+    assert _target_similarity("button", "button btn") != 100.0
+
+
+def test_chrome_equality_next_vs_next_button():
+    assert _target_similarity("Next", "Next button") == 100.0
+
+
+def test_chrome_equality_login_vs_login_button():
+    assert _target_similarity("Login", "Login button") == 100.0
+
+
+@pytest.mark.parametrize(
+    ("expected_target", "observed_target"),
+    [
+        ("Cancel", "Submit order"),
+        ("OK", "Cancel button"),
+        ("Next", "Back button"),
+    ],
+)
+def test_target_similarity_control_chrome_keeps_distinct_controls_below_threshold(
+    expected_target: str,
+    observed_target: str,
+):
+    assert _target_similarity(expected_target, observed_target) < FUZZY_THRESHOLD
+
+
+@pytest.mark.parametrize(
+    ("expected_target", "observed_target"),
+    [
+        ("Go button", "Google button"),
+        ("Mentorship title", "Join Mentorship button"),
+        ("Log button", "Logout button"),
+    ],
+)
+def test_control_chrome_equality_does_not_force_unrelated_stems(
+    expected_target: str,
+    observed_target: str,
+):
+    """Chrome strip must not invent exact equality for different meaning tokens.
+
+    Some of these pairs already score above FUZZY_THRESHOLD via pre-existing
+    fuzzy overlap; chrome normalization must not upgrade them to 100.0.
+    """
+    assert _target_similarity(expected_target, observed_target) < 100.0
+
+
+def test_control_chrome_clears_wrong_target_on_click_pair():
+    exp = _exp(1, ActionType.click, "Next")
+    obs = _obs(1, ActionType.click, "Next button")
+    assert FindingType.wrong_target not in _classify_pair(exp, obs)
+
+
+def test_control_chrome_does_not_broaden_assert_target_role_conflict():
+    """Assertion path still rejects Mentorship title ← Join Mentorship button."""
+    from reckon.tolerance import assertion_satisfied, assertion_target_relevant
+
+    obs = ObservedAction(
+        index=1,
+        action=ActionType.assert_visible,
+        target="Join Mentorship button",
+        timestamp_ms=1000,
+        assertion_evidence=AssertionEvidence(
+            description="Join Mentorship CTA",
+            visible_text="Join Mentorship",
+        ),
+        confidence=0.9,
+    )
+    # Chrome path must not declare exact equality for title vs CTA.
+    assert _target_similarity("Mentorship title", "Join Mentorship button") < 100.0
+    assert not assertion_target_relevant("Mentorship title", obs)
+    assert not assertion_satisfied(
+        "Mentorship",
+        obs,
+        expected_target="Mentorship title",
+    )
+
+
+def test_control_chrome_does_not_equate_unrelated_assert_targets():
+    """Non-click actions do not gain chrome synonym matching."""
+    exp = _exp(1, ActionType.assert_visible, "Hub screen")
+    obs = _obs(1, ActionType.assert_visible, "Welcome page button")
+    assert _target_similarity(exp.target or "", obs.target or "") < FUZZY_THRESHOLD
+    assert FindingType.wrong_target in _classify_pair(exp, obs)
+
+
+def test_align_next_vs_next_button_does_not_report_wrong_target():
+    expected = ExpectedTrace(
+        scenario_title="Next chrome",
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="Next"),
+        ],
+    )
+    observed = ObservedTrace(
+        source_file="chrome.mp4",
+        actions=[
+            ObservedAction(
+                index=1,
+                action=ActionType.click,
+                target="Next button",
+                timestamp_ms=1000,
+                confidence=0.9,
+            ),
+        ],
+    )
+    result = align(expected, observed)
+    assert result.step_verdicts[0].passed
+    assert not any(f.type == FindingType.wrong_target for f in result.findings)
+
+
 # ---------------------------------------------------------------------------
 # _dp_align — structure
 # ---------------------------------------------------------------------------
@@ -789,14 +922,15 @@ def test_classify_pair_assertion_contradictions_remain_findings(
     assert FindingType.assertion_not_observed in findings
 
 
-def test_classify_pair_terms_page_assertion_accepts_visible_screen_state():
+def test_classify_pair_terms_page_assertion_requires_evidence_text_match():
+    """Screen/target nouns alone do not confirm an assertion; evidence text must."""
     exp = _exp(
         1,
         ActionType.assert_visible,
         "terms and condtions page",
         assertion="User Should able to launch terms and condtions page",
     )
-    obs = ObservedAction(
+    obs_screen_only = ObservedAction(
         index=1,
         timestamp_ms=500,
         action=ActionType.assert_visible,
@@ -808,8 +942,21 @@ def test_classify_pair_terms_page_assertion_accepts_visible_screen_state():
         confidence=0.9,
         screen_description="Terms and conditions text is visible in an overlay.",
     )
+    assert FindingType.assertion_not_observed in _classify_pair(exp, obs_screen_only)
 
-    assert _classify_pair(exp, obs) == []
+    obs_with_claim = ObservedAction(
+        index=1,
+        timestamp_ms=500,
+        action=ActionType.assert_visible,
+        target="Terms and Conditions page",
+        assertion_evidence=AssertionEvidence(
+            description="User launched terms and conditions page",
+            visible_text="User Should able to launch terms and condtions page",
+        ),
+        confidence=0.9,
+        screen_description="Terms and conditions text is visible in an overlay.",
+    )
+    assert _classify_pair(exp, obs_with_claim) == []
 
 
 def test_classify_pair_terms_page_assertion_rejects_unrelated_page():
@@ -1132,7 +1279,8 @@ def test_align_assertion_not_observed_has_timestamp():
     assert findings[0].evidence_timestamp_ms == 8000
 
 
-def test_align_page_assertion_to_navigation_screen_state():
+def test_align_page_assertion_requires_evidence_not_screen_tokens():
+    """Screen copy that only shares target nouns must not pass an assertion."""
     expected = _make_expected([
         _exp(1, ActionType.navigate, "Start page"),
         _exp(2, ActionType.click, "Sign in"),
@@ -1180,37 +1328,17 @@ def test_align_page_assertion_to_navigation_screen_state():
         ),
     ])
 
-    assert _screen_description_supports_assertion(
+    assert not _screen_description_supports_assertion(
         expected.steps[2], observed.actions[2]
     )
     result = align(expected, observed)
 
     step = result.step_verdicts[2]
-    assert step.matched_observed_index == 5
-    assert step.evidence_timestamp_ms == 6500
-    assert step.passed is True
+    assert step.passed is False
+    assert FindingType.assertion_not_observed in step.finding_types
 
 
-def test_screen_description_support_requires_all_meaningful_target_tokens():
-    expected = _exp(
-        1,
-        ActionType.assert_visible,
-        "GitHub login page",
-        assertion="the GitHub login page is displayed.",
-    )
-    observed = ObservedAction(
-        index=1,
-        timestamp_ms=1000,
-        action=ActionType.navigate,
-        target="example.invalid/auth",
-        confidence=0.95,
-        screen_description="Account access form is loaded.",
-    )
-
-    assert not _screen_description_supports_assertion(expected, observed)
-
-
-def test_screen_description_support_preserves_exact_target_phrase():
+def test_screen_description_support_is_deprecated_noop():
     expected = _exp(
         1,
         ActionType.assert_visible,
@@ -1226,7 +1354,60 @@ def test_screen_description_support_preserves_exact_target_phrase():
         screen_description="Account settings page is loaded.",
     )
 
-    assert _screen_description_supports_assertion(expected, observed)
+    assert not _screen_description_supports_assertion(expected, observed)
+
+
+def test_align_assertion_passes_with_visible_text_evidence():
+    expected = _make_expected([
+        _exp(
+            1,
+            ActionType.assert_visible,
+            "GitHub login page",
+            assertion="the GitHub login page is displayed",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=6500,
+            action=ActionType.assert_visible,
+            target="GitHub login page",
+            assertion_evidence=AssertionEvidence(
+                description="Sign-in form visible",
+                visible_text="the GitHub login page is displayed",
+            ),
+            confidence=0.95,
+            screen_description="GitHub sign-in page is loaded.",
+        ),
+    ])
+
+    result = align(expected, observed)
+    assert result.step_verdicts[0].passed is True
+    assert result.verdict == AuditVerdict.faithful
+
+
+def test_align_studio_settings_distractor_does_not_false_pass_login():
+    case = Path(__file__).resolve().parents[1] / (
+        "eval/aligner_evidence/ea_coarse_login_spinner_distract"
+    )
+    expected = ExpectedTrace.model_validate_json(
+        (case / "expected.json").read_text(encoding="utf-8")
+    )
+    observed = ObservedTrace.model_validate_json(
+        (case / "observed.json").read_text(encoding="utf-8")
+    )
+
+    result = align(expected, observed)
+    step2 = result.step_verdicts[1]
+    assert step2.passed is False
+    assert FindingType.assertion_not_observed in step2.finding_types
+    assert result.verdict == AuditVerdict.unfaithful
+    # Studio Settings must not be the assertion match.
+    matched = {
+        action.index: action for action in observed.actions
+    }.get(step2.matched_observed_index or -1)
+    if matched is not None:
+        assert "studio" not in (matched.target or "").lower()
 
 
 def test_align_preserves_extra_action_after_valid_match():
@@ -1249,7 +1430,7 @@ def test_align_preserves_extra_action_after_valid_match():
     assert result.verdict == AuditVerdict.faithful
 
 
-def test_align_screen_state_support_does_not_override_true_contradiction():
+def test_align_screen_tokens_do_not_confirm_contradictory_assertion():
     expected = _make_expected([
         _exp(
             1,
@@ -1271,6 +1452,8 @@ def test_align_screen_state_support_does_not_override_true_contradiction():
 
     result = align(expected, observed)
 
+    # Navigate is incompatible with assert_visible once screen-support pairing
+    # is disabled, so the assertion step is unmatched rather than false-passed.
     assert FindingType.missing_action in {
         finding.type for finding in result.findings
     }

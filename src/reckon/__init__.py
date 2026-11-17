@@ -1,9 +1,14 @@
 from reckon.aligner import align
+from reckon.assist import align_with_assist
+from reckon.assist_propose import ALIGN_ASSIST_MODEL
+from reckon.assist_evidence_select import select_evidence_bundle_candidates
 from reckon.crosscheck import (
     run_cross_check,
     select_crosscheck_targets,
     verify_target,
 )
+from reckon.episodes import cluster_observed_episodes
+from reckon.episode_verifier import verify_trace_against_episodes
 from reckon.extractor import make_client, extract_window
 from reckon.frames import (
     extract_frame,
@@ -21,7 +26,14 @@ from reckon.sampler import (
 from reckon.schema import (
     ActionType,
     AssertionEvidence,
+    AssistReport,
+    AssistedAlignResult,
     AuditResult,
+    CandidateEvidenceItem,
+    CandidateEvidenceTrace,
+    CandidateEvidenceType,
+    CandidateSearchStatus,
+    CandidateValidationStatus,
     CrossCheckAnswer,
     CrossCheckKind,
     CrossCheckReport,
@@ -31,16 +43,33 @@ from reckon.schema import (
     ExpectedTrace,
     Finding,
     FindingType,
+    FrameManifest,
+    FrameManifestEntry,
     ObservedAction,
     ObservedTrace,
+    ScreenEpisode,
     StepVerdict,
     merge_observed_chunks,
 )
+from reckon.stage2c import (
+    STAGE2C_MODEL,
+    build_frame_manifest,
+    discover_candidate_evidence,
+)
 
 __all__ = [
+    "ALIGN_ASSIST_MODEL",
+    "STAGE2C_MODEL",
     "ActionType",
     "AssertionEvidence",
+    "AssistReport",
+    "AssistedAlignResult",
     "AuditResult",
+    "CandidateEvidenceItem",
+    "CandidateEvidenceTrace",
+    "CandidateEvidenceType",
+    "CandidateSearchStatus",
+    "CandidateValidationStatus",
     "CrossCheckAnswer",
     "CrossCheckKind",
     "CrossCheckReport",
@@ -50,10 +79,19 @@ __all__ = [
     "ExpectedTrace",
     "Finding",
     "FindingType",
+    "FrameManifest",
+    "FrameManifestEntry",
     "ObservedAction",
     "ObservedTrace",
+    "ScreenEpisode",
     "StepVerdict",
     "align",
+    "align_with_assist",
+    "build_frame_manifest",
+    "cluster_observed_episodes",
+    "discover_candidate_evidence",
+    "verify_trace_against_episodes",
+    "select_evidence_bundle_candidates",
     "derive_action_windows",
     "detect_change_events",
     "extract_frame",

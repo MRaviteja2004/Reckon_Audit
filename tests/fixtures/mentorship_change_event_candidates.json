@@ -1,0 +1,607 @@
+{
+  "description": "Debounced Mentorship change-event candidates before MAX_CHANGE_EVENTS cap (DATE TIME BUILD TC 2-TC 14.MP4).",
+  "english_checkbox_timestamp_ms": 158011,
+  "terms_checkbox_timestamp_ms": 189513,
+  "candidates": [
+    {
+      "event_id": "evt-500",
+      "timestamp_ms": 500,
+      "confidence": 0.009861111111111112
+    },
+    {
+      "event_id": "evt-3500",
+      "timestamp_ms": 3500,
+      "confidence": 0.003333333333333333
+    },
+    {
+      "event_id": "evt-7250",
+      "timestamp_ms": 7250,
+      "confidence": 0.3315277777777778
+    },
+    {
+      "event_id": "evt-9000",
+      "timestamp_ms": 9000,
+      "confidence": 0.09826388888888889
+    },
+    {
+      "event_id": "evt-10750",
+      "timestamp_ms": 10750,
+      "confidence": 0.3663194444444444
+    },
+    {
+      "event_id": "evt-13751",
+      "timestamp_ms": 13751,
+      "confidence": 0.9540277777777778
+    },
+    {
+      "event_id": "evt-15501",
+      "timestamp_ms": 15501,
+      "confidence": 0.10368055555555555
+    },
+    {
+      "event_id": "evt-16251",
+      "timestamp_ms": 16251,
+      "confidence": 0.9618749999999999
+    },
+    {
+      "event_id": "evt-17751",
+      "timestamp_ms": 17751,
+      "confidence": 0.9550000000000001
+    },
+    {
+      "event_id": "evt-19001",
+      "timestamp_ms": 19001,
+      "confidence": 1.0
+    },
+    {
+      "event_id": "evt-21001",
+      "timestamp_ms": 21001,
+      "confidence": 0.9741666666666666
+    },
+    {
+      "event_id": "evt-21751",
+      "timestamp_ms": 21751,
+      "confidence": 0.9032638888888889
+    },
+    {
+      "event_id": "evt-23268",
+      "timestamp_ms": 23268,
+      "confidence": 0.6263888888888889
+    },
+    {
+      "event_id": "evt-26268",
+      "timestamp_ms": 26268,
+      "confidence": 0.08152777777777778
+    },
+    {
+      "event_id": "evt-27001",
+      "timestamp_ms": 27001,
+      "confidence": 0.0020833333333333333
+    },
+    {
+      "event_id": "evt-28001",
+      "timestamp_ms": 28001,
+      "confidence": 0.094375
+    },
+    {
+      "event_id": "evt-34270",
+      "timestamp_ms": 34270,
+      "confidence": 0.07770833333333334
+    },
+    {
+      "event_id": "evt-35003",
+      "timestamp_ms": 35003,
+      "confidence": 0.041111111111111105
+    },
+    {
+      "event_id": "evt-37003",
+      "timestamp_ms": 37003,
+      "confidence": 0.025069444444444443
+    },
+    {
+      "event_id": "evt-37770",
+      "timestamp_ms": 37770,
+      "confidence": 0.0011805555555555556
+    },
+    {
+      "event_id": "evt-40753",
+      "timestamp_ms": 40753,
+      "confidence": 0.0013194444444444445
+    },
+    {
+      "event_id": "evt-41520",
+      "timestamp_ms": 41520,
+      "confidence": 0.0011805555555555556
+    },
+    {
+      "event_id": "evt-42503",
+      "timestamp_ms": 42503,
+      "confidence": 0.09118055555555556
+    },
+    {
+      "event_id": "evt-43503",
+      "timestamp_ms": 43503,
+      "confidence": 0.0019444444444444446
+    },
+    {
+      "event_id": "evt-44503",
+      "timestamp_ms": 44503,
+      "confidence": 0.004583333333333333
+    },
+    {
+      "event_id": "evt-45253",
+      "timestamp_ms": 45253,
+      "confidence": 0.9704861111111112
+    },
+    {
+      "event_id": "evt-46503",
+      "timestamp_ms": 46503,
+      "confidence": 0.0020833333333333333
+    },
+    {
+      "event_id": "evt-47253",
+      "timestamp_ms": 47253,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-48003",
+      "timestamp_ms": 48003,
+      "confidence": 0.0020833333333333333
+    },
+    {
+      "event_id": "evt-48753",
+      "timestamp_ms": 48753,
+      "confidence": 0.0018750000000000001
+    },
+    {
+      "event_id": "evt-49503",
+      "timestamp_ms": 49503,
+      "confidence": 0.0020833333333333333
+    },
+    {
+      "event_id": "evt-50253",
+      "timestamp_ms": 50253,
+      "confidence": 0.0020833333333333333
+    },
+    {
+      "event_id": "evt-51003",
+      "timestamp_ms": 51003,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-51753",
+      "timestamp_ms": 51753,
+      "confidence": 0.0019444444444444446
+    },
+    {
+      "event_id": "evt-52503",
+      "timestamp_ms": 52503,
+      "confidence": 0.0021527777777777778
+    },
+    {
+      "event_id": "evt-53253",
+      "timestamp_ms": 53253,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-54003",
+      "timestamp_ms": 54003,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-54755",
+      "timestamp_ms": 54755,
+      "confidence": 0.0018750000000000001
+    },
+    {
+      "event_id": "evt-55505",
+      "timestamp_ms": 55505,
+      "confidence": 0.0019444444444444446
+    },
+    {
+      "event_id": "evt-56255",
+      "timestamp_ms": 56255,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-57005",
+      "timestamp_ms": 57005,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-57755",
+      "timestamp_ms": 57755,
+      "confidence": 0.0019444444444444446
+    },
+    {
+      "event_id": "evt-58505",
+      "timestamp_ms": 58505,
+      "confidence": 0.0020833333333333333
+    },
+    {
+      "event_id": "evt-59255",
+      "timestamp_ms": 59255,
+      "confidence": 0.002013888888888889
+    },
+    {
+      "event_id": "evt-60271",
+      "timestamp_ms": 60271,
+      "confidence": 0.96875
+    },
+    {
+      "event_id": "evt-61021",
+      "timestamp_ms": 61021,
+      "confidence": 0.96875
+    },
+    {
+      "event_id": "evt-62005",
+      "timestamp_ms": 62005,
+      "confidence": 0.9677777777777777
+    },
+    {
+      "event_id": "evt-63755",
+      "timestamp_ms": 63755,
+      "confidence": 0.3315277777777778
+    },
+    {
+      "event_id": "evt-66005",
+      "timestamp_ms": 66005,
+      "confidence": 0.07388888888888888
+    },
+    {
+      "event_id": "evt-67255",
+      "timestamp_ms": 67255,
+      "confidence": 0.4778472222222222
+    },
+    {
+      "event_id": "evt-68005",
+      "timestamp_ms": 68005,
+      "confidence": 0.34027777777777773
+    },
+    {
+      "event_id": "evt-68755",
+      "timestamp_ms": 68755,
+      "confidence": 0.3761111111111111
+    },
+    {
+      "event_id": "evt-70005",
+      "timestamp_ms": 70005,
+      "confidence": 0.095
+    },
+    {
+      "event_id": "evt-70755",
+      "timestamp_ms": 70755,
+      "confidence": 0.043125
+    },
+    {
+      "event_id": "evt-72505",
+      "timestamp_ms": 72505,
+      "confidence": 0.37881944444444443
+    },
+    {
+      "event_id": "evt-73755",
+      "timestamp_ms": 73755,
+      "confidence": 0.5654166666666667
+    },
+    {
+      "event_id": "evt-75505",
+      "timestamp_ms": 75505,
+      "confidence": 0.06965277777777777
+    },
+    {
+      "event_id": "evt-76755",
+      "timestamp_ms": 76755,
+      "confidence": 0.20777777777777778
+    },
+    {
+      "event_id": "evt-77506",
+      "timestamp_ms": 77506,
+      "confidence": 0.9763888888888889
+    },
+    {
+      "event_id": "evt-79506",
+      "timestamp_ms": 79506,
+      "confidence": 0.8205555555555556
+    },
+    {
+      "event_id": "evt-81256",
+      "timestamp_ms": 81256,
+      "confidence": 0.22951388888888888
+    },
+    {
+      "event_id": "evt-82256",
+      "timestamp_ms": 82256,
+      "confidence": 0.008611111111111111
+    },
+    {
+      "event_id": "evt-83506",
+      "timestamp_ms": 83506,
+      "confidence": 0.03486111111111111
+    },
+    {
+      "event_id": "evt-84256",
+      "timestamp_ms": 84256,
+      "confidence": 0.03486111111111111
+    },
+    {
+      "event_id": "evt-85756",
+      "timestamp_ms": 85756,
+      "confidence": 0.0632638888888889
+    },
+    {
+      "event_id": "evt-87256",
+      "timestamp_ms": 87256,
+      "confidence": 0.028541666666666667
+    },
+    {
+      "event_id": "evt-88256",
+      "timestamp_ms": 88256,
+      "confidence": 0.002361111111111111
+    },
+    {
+      "event_id": "evt-89006",
+      "timestamp_ms": 89006,
+      "confidence": 0.0037500000000000003
+    },
+    {
+      "event_id": "evt-89756",
+      "timestamp_ms": 89756,
+      "confidence": 0.03986111111111111
+    },
+    {
+      "event_id": "evt-90756",
+      "timestamp_ms": 90756,
+      "confidence": 0.007083333333333333
+    },
+    {
+      "event_id": "evt-91506",
+      "timestamp_ms": 91506,
+      "confidence": 0.005416666666666667
+    },
+    {
+      "event_id": "evt-92756",
+      "timestamp_ms": 92756,
+      "confidence": 0.8618055555555555
+    },
+    {
+      "event_id": "evt-93506",
+      "timestamp_ms": 93506,
+      "confidence": 0.31687499999999996
+    },
+    {
+      "event_id": "evt-94506",
+      "timestamp_ms": 94506,
+      "confidence": 0.9500694444444444
+    },
+    {
+      "event_id": "evt-95756",
+      "timestamp_ms": 95756,
+      "confidence": 0.3299305555555555
+    },
+    {
+      "event_id": "evt-97756",
+      "timestamp_ms": 97756,
+      "confidence": 0.26104166666666667
+    },
+    {
+      "event_id": "evt-98756",
+      "timestamp_ms": 98756,
+      "confidence": 0.005625
+    },
+    {
+      "event_id": "evt-100258",
+      "timestamp_ms": 100258,
+      "confidence": 0.004722222222222222
+    },
+    {
+      "event_id": "evt-102008",
+      "timestamp_ms": 102008,
+      "confidence": 0.25347222222222227
+    },
+    {
+      "event_id": "evt-104008",
+      "timestamp_ms": 104008,
+      "confidence": 0.2436111111111111
+    },
+    {
+      "event_id": "evt-106258",
+      "timestamp_ms": 106258,
+      "confidence": 0.004097222222222222
+    },
+    {
+      "event_id": "evt-107008",
+      "timestamp_ms": 107008,
+      "confidence": 0.011944444444444445
+    },
+    {
+      "event_id": "evt-108258",
+      "timestamp_ms": 108258,
+      "confidence": 0.24305555555555555
+    },
+    {
+      "event_id": "evt-111008",
+      "timestamp_ms": 111008,
+      "confidence": 0.6601388888888889
+    },
+    {
+      "event_id": "evt-135010",
+      "timestamp_ms": 135010,
+      "confidence": 0.44187499999999996
+    },
+    {
+      "event_id": "evt-135760",
+      "timestamp_ms": 135760,
+      "confidence": 0.1488888888888889
+    },
+    {
+      "event_id": "evt-137010",
+      "timestamp_ms": 137010,
+      "confidence": 0.007152777777777778
+    },
+    {
+      "event_id": "evt-142010",
+      "timestamp_ms": 142010,
+      "confidence": 0.2720138888888889
+    },
+    {
+      "event_id": "evt-146011",
+      "timestamp_ms": 146011,
+      "confidence": 0.43125
+    },
+    {
+      "event_id": "evt-146761",
+      "timestamp_ms": 146761,
+      "confidence": 0.4377083333333333
+    },
+    {
+      "event_id": "evt-148011",
+      "timestamp_ms": 148011,
+      "confidence": 0.4774305555555556
+    },
+    {
+      "event_id": "evt-148761",
+      "timestamp_ms": 148761,
+      "confidence": 0.46465277777777775
+    },
+    {
+      "event_id": "evt-150261",
+      "timestamp_ms": 150261,
+      "confidence": 0.45388888888888884
+    },
+    {
+      "event_id": "evt-158011",
+      "timestamp_ms": 158011,
+      "confidence": 0.001736111111111111
+    },
+    {
+      "event_id": "evt-189513",
+      "timestamp_ms": 189513,
+      "confidence": 0.08361111111111111
+    },
+    {
+      "event_id": "evt-196265",
+      "timestamp_ms": 196265,
+      "confidence": 0.208125
+    },
+    {
+      "event_id": "evt-211765",
+      "timestamp_ms": 211765,
+      "confidence": 0.07090277777777779
+    },
+    {
+      "event_id": "evt-213765",
+      "timestamp_ms": 213765,
+      "confidence": 0.3182638888888889
+    },
+    {
+      "event_id": "evt-232750",
+      "timestamp_ms": 232750,
+      "confidence": 0.416875
+    },
+    {
+      "event_id": "evt-233500",
+      "timestamp_ms": 233500,
+      "confidence": 0.48423611111111114
+    },
+    {
+      "event_id": "evt-234250",
+      "timestamp_ms": 234250,
+      "confidence": 0.44784722222222223
+    },
+    {
+      "event_id": "evt-235000",
+      "timestamp_ms": 235000,
+      "confidence": 0.21444444444444444
+    },
+    {
+      "event_id": "evt-235750",
+      "timestamp_ms": 235750,
+      "confidence": 0.4141666666666667
+    },
+    {
+      "event_id": "evt-237750",
+      "timestamp_ms": 237750,
+      "confidence": 0.6083333333333333
+    },
+    {
+      "event_id": "evt-262503",
+      "timestamp_ms": 262503,
+      "confidence": 0.41555555555555557
+    },
+    {
+      "event_id": "evt-270003",
+      "timestamp_ms": 270003,
+      "confidence": 0.4698611111111111
+    },
+    {
+      "event_id": "evt-271003",
+      "timestamp_ms": 271003,
+      "confidence": 0.4149305555555556
+    },
+    {
+      "event_id": "evt-271753",
+      "timestamp_ms": 271753,
+      "confidence": 0.7013194444444444
+    },
+    {
+      "event_id": "evt-283753",
+      "timestamp_ms": 283753,
+      "confidence": 0.481875
+    },
+    {
+      "event_id": "evt-294255",
+      "timestamp_ms": 294255,
+      "confidence": 0.4807638888888889
+    },
+    {
+      "event_id": "evt-295005",
+      "timestamp_ms": 295005,
+      "confidence": 0.07659722222222222
+    },
+    {
+      "event_id": "evt-317506",
+      "timestamp_ms": 317506,
+      "confidence": 0.07555555555555556
+    },
+    {
+      "event_id": "evt-318256",
+      "timestamp_ms": 318256,
+      "confidence": 0.4859027777777778
+    },
+    {
+      "event_id": "evt-320006",
+      "timestamp_ms": 320006,
+      "confidence": 0.47312499999999996
+    },
+    {
+      "event_id": "evt-321256",
+      "timestamp_ms": 321256,
+      "confidence": 0.1992361111111111
+    },
+    {
+      "event_id": "evt-322756",
+      "timestamp_ms": 322756,
+      "confidence": 0.009444444444444445
+    },
+    {
+      "event_id": "evt-329756",
+      "timestamp_ms": 329756,
+      "confidence": 0.3539583333333334
+    },
+    {
+      "event_id": "evt-340758",
+      "timestamp_ms": 340758,
+      "confidence": 0.6422222222222222
+    },
+    {
+      "event_id": "evt-343508",
+      "timestamp_ms": 343508,
+      "confidence": 0.7775
+    },
+    {
+      "event_id": "evt-344258",
+      "timestamp_ms": 344258,
+      "confidence": 0.15333333333333335
+    }
+  ]
+}

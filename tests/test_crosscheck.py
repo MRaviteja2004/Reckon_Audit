@@ -697,6 +697,8 @@ def test_semantic_assertion_equivalence_requires_direct_visual_present():
 
 
 def test_run_cross_check_records_each_semantic_candidate():
+    # Sign in ↔ GitHub header Sign in is recovered in Stage 3 baseline;
+    # Stage 4 semantic candidates cover remaining non-auth label drift.
     expected = _expected([
         ExpectedStep(
             index=1,
@@ -726,9 +728,10 @@ def test_run_cross_check_records_each_semantic_candidate():
         ),
     ])
     audit = align(expected, observed)
+    assert audit.step_verdicts[0].passed is True
+    assert audit.step_verdicts[0].recovery_reason == "auth_cta_synonym_recovery"
     client = MagicMock()
     client.chat.completions.create.side_effect = [
-        _equivalent_decision(0.95),
         _equivalent_decision(0.95),
     ]
 
@@ -741,8 +744,8 @@ def test_run_cross_check_records_each_semantic_candidate():
             openai_client=client,
         )
 
-    assert client.chat.completions.create.call_count == 2
-    assert len(report.semantic_diagnostics) == 2
+    assert client.chat.completions.create.call_count == 1
+    assert len(report.semantic_diagnostics) == 1
     assert [
         (
             diagnostic.expected_step_index,
@@ -752,7 +755,6 @@ def test_run_cross_check_records_each_semantic_candidate():
         )
         for diagnostic in report.semantic_diagnostics
     ] == [
-        (1, 1, "target", True),
         (2, 2, "target", True),
     ]
 
@@ -784,6 +786,26 @@ def test_run_cross_check_cannot_semantically_override_login_failure():
     client.chat.completions.create.assert_not_called()
 
 
+def test_github_auth_cta_header_recovered_before_stage4_semantic():
+    """Sign in ↔ GitHub header Sign in is owned by Stage 3 auth CTA recovery."""
+    expected = _expected([
+        ExpectedStep(index=1, action=ActionType.click, target="Sign in button"),
+    ])
+    observed = _observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=4000,
+            action=ActionType.click,
+            target="Sign in button in the GitHub homepage header",
+            confidence=0.95,
+        ),
+    ])
+    audit = align(expected, observed)
+    assert audit.step_verdicts[0].passed is True
+    assert audit.step_verdicts[0].recovery_reason == "auth_cta_synonym_recovery"
+    assert select_semantic_candidates(expected, observed, audit) == []
+
+
 @pytest.mark.parametrize(
     (
         "kind",
@@ -792,12 +814,6 @@ def test_run_cross_check_cannot_semantically_override_login_failure():
         "expected_action",
     ),
     [
-        (
-            _SemanticCandidateKind.target,
-            "Sign in button",
-            "Sign in button in the GitHub homepage header",
-            ActionType.click,
-        ),
         (
             _SemanticCandidateKind.target,
             "username field",
@@ -1651,6 +1667,84 @@ def test_apply_verdicts_keeps_finding_on_absent():
     assert refined.step_verdicts[0].passed is False
 
 
+def test_apply_verdicts_absent_reinstates_low_confidence_assist_clear():
+    expected, observed = _ambiguous_assertion_traces()
+    audit = AuditResult(
+        verdict=AuditVerdict.faithful,
+        fidelity_score=1.0,
+        findings=[],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=True,
+                matched_observed_index=1,
+                evidence_timestamp_ms=1000,
+                finding_types=[],
+                cleared_by_assist=True,
+                assist_confidence=0.7,
+            )
+        ],
+    )
+    verdicts = [
+        CrossCheckVerdict(
+            question="q",
+            answer=CrossCheckAnswer.absent,
+            confidence=0.9,
+            rationale="opt-out screen is not settings",
+            expected_step_index=1,
+            observed_action_index=1,
+        )
+    ]
+
+    refined = _apply_verdicts(
+        audit, verdicts, expected_trace=expected, observed_trace=observed
+    )
+
+    assert refined.step_verdicts[0].passed is False
+    assert refined.step_verdicts[0].cleared_by_assist is False
+    assert any(
+        f.type == FindingType.assertion_not_observed and f.expected_step_index == 1
+        for f in refined.findings
+    )
+
+
+def test_apply_verdicts_absent_keeps_high_confidence_assist_clear():
+    expected, observed = _ambiguous_assertion_traces()
+    audit = AuditResult(
+        verdict=AuditVerdict.faithful,
+        fidelity_score=1.0,
+        findings=[],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=True,
+                matched_observed_index=1,
+                evidence_timestamp_ms=1000,
+                finding_types=[],
+                cleared_by_assist=True,
+                assist_confidence=0.95,
+            )
+        ],
+    )
+    verdicts = [
+        CrossCheckVerdict(
+            question="q",
+            answer=CrossCheckAnswer.absent,
+            confidence=0.9,
+            rationale="model disagrees",
+            expected_step_index=1,
+            observed_action_index=1,
+        )
+    ]
+
+    refined = _apply_verdicts(
+        audit, verdicts, expected_trace=expected, observed_trace=observed
+    )
+
+    assert refined.step_verdicts[0].passed is True
+    assert refined.findings == []
+
+
 def test_apply_verdicts_does_not_overturn_low_confidence_present():
     expected, observed = _ambiguous_assertion_traces()
     audit = _audit_with_failed_assertion()
@@ -1834,6 +1928,88 @@ def test_apply_verdicts_preserves_other_findings_on_same_step():
     }
     assert refined.verdict == AuditVerdict.unfaithful
     assert refined.step_verdicts[0].passed is False
+
+
+def test_apply_verdicts_retargets_mentor_dashboard_evidence_away_from_join_confirmation():
+    """E27: Stage 4 clear must cite dashboard evidence, not join confirmation."""
+    expected = _expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.assert_visible,
+            target="Mentor Dashboard",
+            assertion="The empty Mentor Dashboard is displayed",
+        ),
+    ])
+    observed = _observed([
+        ObservedAction(
+            index=61,
+            timestamp_ms=209765,
+            action=ActionType.assert_visible,
+            target="Join confirmation screen",
+            confidence=0.9,
+            assertion_evidence=AssertionEvidence(
+                description="Success message with checkmark confirming joining mentorship programme",
+                visible_text="You've now joined the Uber mentorship programme",
+            ),
+            screen_description="Confirmation screen with Continue button",
+        ),
+        ObservedAction(
+            index=70,
+            timestamp_ms=240750,
+            action=ActionType.assert_visible,
+            target="Mentorship screen",
+            confidence=0.9,
+            assertion_evidence=AssertionEvidence(
+                description="Empty state on the Mentorship page",
+                visible_text="No learners yet. You'll be alerted soon.",
+            ),
+            screen_description=(
+                "Mentorship page showing 0 active learners, $0 you can earn, "
+                "and a How it works button"
+            ),
+        ),
+    ])
+    audit = AuditResult(
+        verdict=AuditVerdict.unfaithful,
+        fidelity_score=0.0,
+        findings=[
+            Finding(
+                type=FindingType.assertion_not_observed,
+                severity=FindingSeverity.critical,
+                expected_step_index=1,
+                observed_action_index=61,
+                evidence_timestamp_ms=209765,
+                description="empty dashboard not confirmed",
+            ),
+        ],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=False,
+                matched_observed_index=61,
+                evidence_timestamp_ms=209765,
+                finding_types=[FindingType.assertion_not_observed],
+            ),
+        ],
+    )
+    verdict = CrossCheckVerdict(
+        question="Is the empty Mentor Dashboard visible?",
+        answer=CrossCheckAnswer.present,
+        confidence=0.92,
+        rationale="Empty dashboard visible in later frame",
+        expected_step_index=1,
+        observed_action_index=61,
+        supporting_frame_timestamp_ms=240750,
+    )
+
+    refined = _apply_verdicts(
+        audit, [verdict], expected_trace=expected, observed_trace=observed
+    )
+
+    assert refined.findings == []
+    assert refined.step_verdicts[0].passed is True
+    assert refined.step_verdicts[0].matched_observed_index == 70
+    assert refined.step_verdicts[0].evidence_timestamp_ms == 240750
 
 
 # ---------------------------------------------------------------------------

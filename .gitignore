@@ -1,5 +1,8 @@
 # Environment & secrets
 .env
+aligner_assist/
+aligner_evidence/
+.tmp_austin_macros/
 
 # Python
 .venv/

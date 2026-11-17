@@ -13,10 +13,13 @@ from reckon.schema import (
     ObservedTrace,
     StepVerdict,
 )
+from reckon.episode_interaction import (
+    apply_deterministic_auth_cta_recovery,
+    apply_deterministic_typeahead_recovery,
+)
 from reckon.tolerance import (
     ASSERTION_ACTIONS,
     FUZZY_THRESHOLD,
-    _introduces_negation,
     actions_compatible,
     assertion_satisfied,
     finding_severity,
@@ -35,7 +38,12 @@ _GAP_COST = -0.30
 _CHOICE_MATCH = 0
 _CHOICE_GAP_OBS = 1   # skip observed action → extra_action finding
 _CHOICE_GAP_EXP = 2   # skip expected step  → missing_action finding
+# Generic widget nouns stripped before target comparison.
 _TARGET_STRUCTURAL_TERMS = frozenset({"input", "field"})
+# Control chrome used only for exact meaning-equality (not for fuzzy fallback).
+# Remap/tolerance already treat these as noise; the aligner previously did not,
+# which produced wrong_target on short CTAs like "Next" vs "Next button".
+_TARGET_CONTROL_CHROME_TERMS = frozenset({"button", "btn"})
 _OPEN_ORDER_RE = re.compile(r"\bopen\s+(?:the\s+)?order\b", re.IGNORECASE)
 _ORDER_TARGET_RE = re.compile(r"^\s*order\s*#\s*(\d+)\s*$", re.IGNORECASE)
 _ORDER_ROUTE_RE = re.compile(r"(?:^|/)orders/(\d+)/?$", re.IGNORECASE)
@@ -45,31 +53,46 @@ _DISMISS_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _CLOSE_CONTROL_RE = re.compile(r"\b(?:close|dismiss)\b", re.IGNORECASE)
-_VISIBLE_STATE_TERMS = frozenset({
-    "visible", "displayed", "shown", "open", "opened", "loaded", "present",
-})
-_ABSENT_STATE_TERMS = frozenset({
-    "absent", "hidden", "missing", "closed", "dismissed",
-})
-_GENERIC_ASSERTION_TARGETS = frozenset({
-    "message", "banner", "toast", "notification", "confirmation",
-})
 _DIRECT_ASSERTION_BONUS = 0.2
 
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
+def _meaning_tokens(text: str, *, strip: frozenset[str]) -> list[str]:
+    """Lowercase alphanumeric tokens with the given structural set removed."""
+    return [
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if token not in strip
+    ]
+
+
 def _target_similarity(expected: str, observed: str) -> float:
-    """Return target similarity after removing only generic UI structure terms."""
+    """Return target similarity after removing generic UI structure terms.
+
+    Control chrome (``button`` / ``btn``) participates only in an exact
+    meaning-equality check so ``Next`` matches ``Next button`` without turning
+    fuzzy comparison into synonym matching or pulling unrelated stems together
+    (``Go button`` vs ``Google button`` stays on the pre-existing fuzzy path).
+    """
     expected_tokens = re.findall(r"[a-z0-9]+", expected.lower())
     observed_tokens = re.findall(r"[a-z0-9]+", observed.lower())
-    expected_meaning = [
-        token for token in expected_tokens if token not in _TARGET_STRUCTURAL_TERMS
-    ]
-    observed_meaning = [
-        token for token in observed_tokens if token not in _TARGET_STRUCTURAL_TERMS
-    ]
+
+    chrome_strip = _TARGET_STRUCTURAL_TERMS | _TARGET_CONTROL_CHROME_TERMS
+    expected_chrome = _meaning_tokens(expected, strip=chrome_strip)
+    observed_chrome = _meaning_tokens(observed, strip=chrome_strip)
+    # Require non-empty meaning on both sides so pure chrome ("button" vs "btn")
+    # never counts as an exact match.
+    if (
+        expected_chrome
+        and observed_chrome
+        and expected_chrome == observed_chrome
+    ):
+        return 100.0
+
+    expected_meaning = _meaning_tokens(expected, strip=_TARGET_STRUCTURAL_TERMS)
+    observed_meaning = _meaning_tokens(observed, strip=_TARGET_STRUCTURAL_TERMS)
 
     if expected_meaning and observed_meaning:
         if expected_meaning == observed_meaning:
@@ -81,104 +104,19 @@ def _target_similarity(expected: str, observed: str) -> float:
     return 0.0
 
 
-def _assertion_target_relevant(
-    exp: ExpectedStep,
-    obs: ObservedAction,
-) -> bool:
-    """Require concrete assertion targets to match the observed UI context."""
-    if exp.target is None:
-        return True
-
-    expected_tokens = [
-        token
-        for token in re.findall(r"[a-z0-9]+", exp.target.lower())
-        if token not in _TARGET_STRUCTURAL_TERMS
-    ]
-    if (
-        len(expected_tokens) == 1
-        and expected_tokens[0] in _GENERIC_ASSERTION_TARGETS
-    ):
-        return True
-    if (
-        obs.target is not None
-        and _target_similarity(exp.target, obs.target) >= FUZZY_THRESHOLD
-    ):
-        return True
-
-    context_parts = [obs.target or "", obs.screen_description or ""]
-    if obs.assertion_evidence is not None:
-        context_parts.append(obs.assertion_evidence.description)
-    context_tokens = re.findall(
-        r"[a-z0-9]+",
-        " ".join(context_parts).lower(),
-    )
-    return bool(expected_tokens) and all(
-        token in context_tokens for token in expected_tokens
-    )
-
-
 def _screen_description_supports_assertion(
     exp: ExpectedStep,
     obs: ObservedAction,
 ) -> bool:
-    if (
-        exp.action not in ASSERTION_ACTIONS
-        or exp.target is None
-        or exp.assertion is None
-        or obs.screen_description is None
-    ):
-        return False
+    """Deprecated pairing/confirmation heuristic — always False.
 
-    support_texts = [obs.screen_description]
-    if obs.assertion_evidence is not None:
-        support_texts.extend(
-            text
-            for text in (
-                obs.assertion_evidence.description,
-                obs.assertion_evidence.visible_text,
-            )
-            if text
-        )
-    support_tokens = {
-        token
-        for text in support_texts
-        for token in re.findall(r"[a-z0-9]+", text.lower())
-    }
-    if (
-        any(_introduces_negation(exp.assertion, text) for text in support_texts)
-        or support_tokens & _ABSENT_STATE_TERMS
-    ):
-        return False
-
-    if obs.assertion_evidence is not None:
-        return (
-            exp.action == ActionType.assert_visible
-            and obs.target is not None
-            and _target_similarity(exp.target, obs.target) >= FUZZY_THRESHOLD
-            and bool(support_tokens & _VISIBLE_STATE_TERMS)
-        )
-
-    target_tokens = re.findall(r"[a-z0-9]+", exp.target.lower())
-    screen_tokens = re.findall(r"[a-z0-9]+", obs.screen_description.lower())
-    width = len(target_tokens)
-    exact_screen_match = bool(target_tokens) and any(
-        screen_tokens[start:start + width] == target_tokens
-        for start in range(len(screen_tokens) - width + 1)
-    )
-    if exact_screen_match:
-        return True
-
-    meaningful_tokens = [
-        token for token in target_tokens
-        if token not in _TARGET_STRUCTURAL_TERMS
-    ]
-    observed_target_tokens = re.findall(
-        r"[a-z0-9]+", (obs.target or "").lower()
-    )
-    context_tokens = observed_target_tokens + screen_tokens
-    return bool(meaningful_tokens) and all(
-        token in context_tokens for token in meaningful_tokens
-    )
+    Previously, target nouns appearing in ``screen_description`` (e.g. "driver"
+    / "app" on a Studio Settings screen) could confirm an assertion without any
+    proof of the claimed outcome. Assertions must be confirmed only via
+    ``assertion_satisfied`` (evidence text) or Stage 3/4 semantic review.
+    """
+    del exp, obs
+    return False
 
 
 def _order_navigation_supports_open(
@@ -245,25 +183,20 @@ def _action_match_score(exp: ExpectedStep, obs: ObservedAction) -> float:
         actions_compatible(exp.action, obs.action)
         or order_navigation_support
     )
-    screen_supports_assertion = _screen_description_supports_assertion(exp, obs)
-    if not compatible_actions and not screen_supports_assertion:
+    if not compatible_actions:
         return 0.0
 
-    score = 0.4 if compatible_actions else 0.3
-    if screen_supports_assertion and obs.action == ActionType.navigate:
-        score += 0.1
+    score = 0.4
 
     # Target similarity contributes up to 0.4.
+    # Screen-description target-token heuristics are intentionally excluded: they
+    # previously inflated scores for unrelated screens that shared nouns with the
+    # expected target (Studio Settings vs "driver app").
     direct_assertion_support = (
         exp.assertion is not None
-        and assertion_satisfied(exp.assertion, obs)
-        and _assertion_target_relevant(exp, obs)
+        and assertion_satisfied(exp.assertion, obs, expected_target=exp.target)
     )
-    if (
-        screen_supports_assertion
-        or order_navigation_support
-        or dismissal_target_support
-    ):
+    if order_navigation_support or dismissal_target_support:
         score += 0.4
     elif exp.target is not None and obs.target is not None:
         score += 0.4 * _target_similarity(exp.target, obs.target) / 100.0
@@ -403,12 +336,10 @@ def _classify_pair(exp: ExpectedStep, obs: ObservedAction) -> list[FindingType]:
     """Return finding types for a matched (exp, obs) pair; empty list means passed."""
     findings: list[FindingType] = []
 
-    assertion_confirmed = exp.assertion is not None and (
-        (
-            assertion_satisfied(exp.assertion, obs)
-            and _assertion_target_relevant(exp, obs)
-        )
-        or _screen_description_supports_assertion(exp, obs)
+    # Assertions require evidence text (assertion_satisfied) — never target-token
+    # presence in screen_description, which caused Studio Settings–style false passes.
+    assertion_confirmed = exp.assertion is not None and assertion_satisfied(
+        exp.assertion, obs, expected_target=exp.target
     )
     target_confirmed = (
         assertion_confirmed
@@ -546,6 +477,11 @@ def align(expected: ExpectedTrace, observed: ObservedTrace) -> AuditResult:
                     matched_observed_index=implied_by.index,
                     evidence_timestamp_ms=implied_by.timestamp_ms,
                     finding_types=[],
+                    evidence_id=f"O{implied_by.index}",
+                    explanation=(
+                        f"Observed action O{implied_by.index} at "
+                        f"{implied_by.timestamp_ms} ms supports this step."
+                    ),
                 ))
                 continue
             all_findings.append(Finding(
@@ -583,15 +519,46 @@ def align(expected: ExpectedTrace, observed: ObservedTrace) -> AuditResult:
                 matched_observed_index=obs.index,
                 evidence_timestamp_ms=obs.timestamp_ms,
                 finding_types=pair_findings,
+                evidence_id=f"O{obs.index}",
+                explanation=(
+                    None
+                    if pair_findings
+                    else (
+                        f"Observed action O{obs.index} at {obs.timestamp_ms} ms "
+                        "supports this step."
+                    )
+                ),
             ))
 
     total = len(expected.steps)
     passed = sum(1 for v in step_verdicts if v.passed)
     fidelity_score = passed / total if total > 0 else 1.0
 
-    return AuditResult(
+    baseline = AuditResult(
         verdict=verdict_for(all_findings),
         fidelity_score=fidelity_score,
         findings=all_findings,
         step_verdicts=step_verdicts,
+    )
+    # Deterministic typeahead recovery is part of the baseline audit: proven
+    # type → suggestion → confirm sequences clear select missing_action without
+    # changing actions_compatible or inventing selection from typing alone.
+    after_typeahead = apply_deterministic_typeahead_recovery(
+        expected, observed, baseline
+    )
+    # Narrow auth CTA synonym recovery (Sign in ↔ Login) clears click
+    # wrong_target inside trusted windows without widening actions_compatible.
+    recovered = apply_deterministic_auth_cta_recovery(
+        expected, observed, after_typeahead
+    )
+    from reckon.later_support import recover_later_support
+
+    recovered_later = recover_later_support(expected, observed, recovered)
+    from reckon.equivalence.engine import apply_base_equivalence
+
+    return apply_base_equivalence(
+        expected,
+        observed,
+        recovered_later,
+        scenario_text=expected.source_text or "",
     )

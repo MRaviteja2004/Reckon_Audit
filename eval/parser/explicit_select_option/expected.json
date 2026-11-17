@@ -1,0 +1,23 @@
+{
+  "scenario_title": "Explicit earn-mode selection",
+  "steps": [
+    {
+      "index": 1,
+      "action": "select",
+      "target": "Rides and Delivery with car",
+      "input_value": "Rides and Delivery with car",
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Choose \"Rides and Delivery with car\" and tap Continue."
+    },
+    {
+      "index": 2,
+      "action": "click",
+      "target": "Continue",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "Choose \"Rides and Delivery with car\" and tap Continue."
+    }
+  ]
+}

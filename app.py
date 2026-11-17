@@ -5,7 +5,8 @@ Run with:
 
 Stage 1 (parse scenario) uses USSO_TOKEN through Uber AI Gateway.
 Stage 2 (extract trace)  uses the same gateway; frames are decoded locally.
-Stage 3 (align traces)   is deterministic — no API key required.
+Stage 3 (align traces)   is deterministic by default; an optional experimental
+LLM-assisted path is available in the UI only.
 """
 
 import json
@@ -15,7 +16,7 @@ import shutil
 import tempfile
 import traceback
 from pathlib import Path
-from typing import BinaryIO, IO
+from typing import Any, BinaryIO, IO
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -25,6 +26,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from reckon.aligner import align  # noqa: E402
+from reckon.assist import align_with_assist  # noqa: E402
+from reckon.assist_propose import ALIGN_ASSIST_MODEL  # noqa: E402
 from reckon.crosscheck import run_cross_check  # noqa: E402
 from reckon.extractor import make_client  # noqa: E402
 from reckon.latency import (  # noqa: E402
@@ -37,6 +40,9 @@ from reckon.latency import (  # noqa: E402
 from reckon.parser import make_openai_client, parse_scenario  # noqa: E402
 from reckon.sampler import extract_observed_trace  # noqa: E402
 from reckon.schema import (  # noqa: E402
+    AssistMatchMethod,
+    AssistProposalStatus,
+    AssistReport,
     AuditResult,
     AuditVerdict,
     CrossCheckReport,
@@ -47,6 +53,7 @@ from reckon.schema import (  # noqa: E402
     ObservedTrace,
     SemanticDiagnostic,
 )
+from reckon.stage2c import build_frame_manifest  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +63,10 @@ logger = logging.getLogger(__name__)
 # This is the Streamlit demo UI ceiling only; host/proxy limits are separate.
 MAX_UPLOAD_SIZE_MB = 500
 MAX_EXPORT_FILENAME_LENGTH = 120
+
+STAGE3_MODE_DETERMINISTIC = "Deterministic (default)"
+STAGE3_MODE_ASSISTED = "LLM-assisted (experimental)"
+STAGE3_MODE_EVIDENCE = "LLM-assisted evidence-aware (experimental)"
 
 _FINDING_LABELS: dict[FindingType, str] = {
     FindingType.missing_action: "Missing Action",
@@ -159,6 +170,11 @@ def _build_export_payload(
     observed_trace: ObservedTrace | None,
     crosscheck_report: CrossCheckReport | None,
     latency_metrics: dict | None,
+    stage3_mode: str = STAGE3_MODE_DETERMINISTIC,
+    deterministic_stage3: AuditResult | None = None,
+    assisted_stage3: AuditResult | None = None,
+    stage3_assist: AssistReport | None = None,
+    stage3_token_usage: dict | None = None,
 ) -> dict[str, object]:
     """Build a JSON-safe export from results already held in memory."""
     cross_check = None
@@ -174,11 +190,31 @@ def _build_export_payload(
             ],
         }
 
+    stage3_assist_payload = None
+    if stage3_assist is not None:
+        stage3_assist_payload = {
+            "mode": stage3_mode,
+            "assist": stage3_assist.model_dump(mode="json"),
+            "deterministic_audit_result": (
+                deterministic_stage3.model_dump(mode="json")
+                if deterministic_stage3 is not None
+                else None
+            ),
+            "assisted_audit_result": (
+                assisted_stage3.model_dump(mode="json")
+                if assisted_stage3 is not None
+                else None
+            ),
+            "token_usage": stage3_token_usage,
+        }
+
     return {
         "scenario_title": scenario_title,
         "recording_filename": recording_filename,
+        "stage3_mode": stage3_mode,
         "original_audit_result": original_audit_result.model_dump(mode="json"),
         "cross_check": cross_check,
+        "stage3_assist": stage3_assist_payload,
         "expected_trace": (
             expected_trace.model_dump(mode="json") if expected_trace is not None else None
         ),
@@ -229,6 +265,253 @@ def _render_export_download() -> None:
         ),
         mime="application/json",
     )
+
+
+class _AssistUsageTracker:
+    """Optional UI-only wrapper that records token usage from assist LLM calls."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.requests: list[dict[str, Any]] = []
+
+    @property
+    def chat(self) -> Any:
+        return self
+
+    @property
+    def completions(self) -> Any:
+        return self
+
+    def create(self, *args: Any, **kwargs: Any) -> Any:
+        response = self._client.chat.completions.create(*args, **kwargs)
+        usage_info: dict[str, Any] = {"available": False}
+        raw = getattr(response, "_raw_response", None) or getattr(
+            response, "completion", None
+        )
+        usage = getattr(raw, "usage", None) if raw is not None else None
+        if usage is None:
+            usage = getattr(response, "usage", None)
+        if usage is not None:
+            usage_info = {
+                "available": True,
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+        self.requests.append({"model": kwargs.get("model"), "usage": usage_info})
+        return response
+
+
+def _assist_token_usage_summary(requests: list[dict[str, Any]]) -> dict[str, Any]:
+    available = [req for req in requests if req.get("usage", {}).get("available")]
+    return {
+        "request_count": len(requests),
+        "usage_available_count": len(available),
+        "prompt_tokens_sum": sum(
+            (req.get("usage") or {}).get("prompt_tokens") or 0 for req in available
+        ),
+        "completion_tokens_sum": sum(
+            (req.get("usage") or {}).get("completion_tokens") or 0 for req in available
+        ),
+        "total_tokens_sum": sum(
+            (req.get("usage") or {}).get("total_tokens") or 0 for req in available
+        ),
+        "requests": requests,
+    }
+
+
+def _reviewed_skip_pairs(assist: AssistReport) -> set[tuple[int, int]]:
+    """Only accepted Stage 3 resolutions are excluded from Stage 4 semantic review."""
+    return {
+        (pair.expected_step_index, pair.observed_action_index)
+        for pair in assist.reviewed_semantic_pairs
+    }
+
+
+def _observation_timestamp_label(
+    observed: ObservedTrace | None,
+    index: int | None,
+) -> str:
+    """Format an observation id with its decoder timestamp when available."""
+    if index is None:
+        return "—"
+    if observed is None:
+        return f"O{index}"
+    for action in observed.actions:
+        if action.index == index:
+            return f"O{index} @ {_ms_to_timestamp(action.timestamp_ms)}"
+    return f"O{index}"
+
+
+def _render_stage3_assist_panel(
+    *,
+    assist: AssistReport,
+    deterministic: AuditResult,
+    assisted: AuditResult,
+    token_usage: dict[str, Any] | None,
+    observed: ObservedTrace | None = None,
+) -> None:
+    """Render Stage 3 assist diagnostics and a deterministic comparison."""
+    st.subheader("Stage 3 — LLM Assist (experimental)")
+    st.caption(
+        f"Model: `{assist.model}`. Claude proposes; Python validates before apply. "
+        "Only accepted resolutions are excluded from Stage 4 semantic review."
+    )
+    if assist.error:
+        st.warning(f"Assist reported an error and fell back where needed: `{assist.error}`")
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("LLM requests", assist.metrics.llm_request_count)
+    metric_cols[1].metric("Accepted", assist.metrics.proposals_accepted)
+    metric_cols[2].metric("Rejected / failed", assist.metrics.proposals_rejected)
+    metric_cols[3].metric("Assist total", _format_duration_ms(assist.metrics.total_ms))
+    st.caption(
+        "Deterministic align "
+        f"{_format_duration_ms(assist.metrics.deterministic_ms)} · "
+        f"LLM {_format_duration_ms(assist.metrics.llm_ms)} · "
+        f"Unresolved {assist.metrics.unresolved_count}"
+    )
+    if token_usage and token_usage.get("usage_available_count"):
+        st.caption(
+            "Token usage — "
+            f"prompt {token_usage.get('prompt_tokens_sum', 0)}, "
+            f"completion {token_usage.get('completion_tokens_sum', 0)}, "
+            f"total {token_usage.get('total_tokens_sum', 0)}"
+        )
+    elif token_usage:
+        st.caption("Token usage unavailable from the gateway response.")
+
+    det_resolved = [
+        p for p in assist.proposals
+        if p.status == AssistProposalStatus.accepted
+        and p.matching_method == AssistMatchMethod.deterministic
+    ]
+    llm_resolved = [
+        p for p in assist.proposals
+        if p.status == AssistProposalStatus.accepted
+        and p.matching_method == AssistMatchMethod.llm_assisted
+        and not p.challenged_false_pass
+    ]
+    challenged = [
+        p for p in assist.proposals
+        if p.status == AssistProposalStatus.accepted and p.challenged_false_pass
+    ]
+    rejected = [
+        p for p in assist.proposals
+        if p.status != AssistProposalStatus.accepted
+        and (
+            p.status in {AssistProposalStatus.rejected, AssistProposalStatus.failed}
+            or p.matching_method
+            in {AssistMatchMethod.unresolved, AssistMatchMethod.rejected_proposal}
+            or p.reason == "model_unresolved"
+        )
+    ]
+
+    if det_resolved:
+        st.markdown("**Resolved by deterministic delayed evidence**")
+        for proposal in det_resolved:
+            matched = _observation_timestamp_label(
+                observed, proposal.matched_observed_index
+            )
+            support = _observation_timestamp_label(
+                observed, proposal.supporting_observed_index
+            )
+            st.write(
+                f"- Step {proposal.expected_step_index}: "
+                f"{', '.join(ft.value for ft in proposal.finding_types) or 'finding'} "
+                f"cleared (matched {matched}, supporting {support})"
+            )
+    if llm_resolved:
+        st.markdown("**Resolved by Claude (validated)**")
+        for proposal in llm_resolved:
+            matched = _observation_timestamp_label(
+                observed, proposal.matched_observed_index
+            )
+            support = _observation_timestamp_label(
+                observed, proposal.supporting_observed_index
+            )
+            initiation = _observation_timestamp_label(
+                observed, proposal.initiation_observed_index
+            )
+            support_bit = (
+                f", supporting {support}"
+                if proposal.supporting_observed_index is not None
+                else ""
+            )
+            initiation_bit = (
+                f", initiation {initiation}"
+                if proposal.initiation_observed_index is not None
+                else ""
+            )
+            st.write(
+                f"- Step {proposal.expected_step_index}: "
+                f"{', '.join(ft.value for ft in proposal.finding_types) or 'finding'} "
+                f"→ `{proposal.model_answer}` "
+                f"(confidence {proposal.confidence if proposal.confidence is not None else '—'}; "
+                f"matched {matched}{support_bit}{initiation_bit})"
+            )
+            if proposal.rationale:
+                st.caption(proposal.rationale)
+    if challenged:
+        st.markdown("**Challenged suspicious Stage 3 passes**")
+        for proposal in challenged:
+            matched = _observation_timestamp_label(
+                observed, proposal.matched_observed_index
+            )
+            st.write(
+                f"- Step {proposal.expected_step_index}: "
+                f"challenged false pass on matched {matched} "
+                f"(reason `{proposal.reason or 'challenge_false_pass'}`)"
+            )
+            if proposal.rationale:
+                st.caption(proposal.rationale)
+    if rejected:
+        st.markdown("**Rejected or unresolved proposals**")
+        for proposal in rejected:
+            matched = _observation_timestamp_label(
+                observed, proposal.matched_observed_index
+            )
+            st.write(
+                f"- Step {proposal.expected_step_index}: "
+                f"status `{proposal.status.value}`, "
+                f"answer `{proposal.model_answer or '—'}`, "
+                f"reason `{proposal.reason or proposal.matching_method.value}`, "
+                f"matched {matched}"
+            )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Deterministic Stage 3**")
+        st.write(
+            f"Verdict: `{deterministic.verdict.value}` · "
+            f"findings: {len(deterministic.findings)} · "
+            f"fidelity: {deterministic.fidelity_score:.0%}"
+        )
+        if deterministic.findings:
+            for finding in deterministic.findings:
+                st.caption(
+                    f"{finding.type.value} @ step {finding.expected_step_index} "
+                    f"(ts {_ms_to_timestamp(finding.evidence_timestamp_ms)}; "
+                    f"obs {finding.observed_action_index})"
+                )
+        else:
+            st.caption("No findings.")
+    with right:
+        st.markdown("**Assisted Stage 3 (pre–Stage 4)**")
+        st.write(
+            f"Verdict: `{assisted.verdict.value}` · "
+            f"findings: {len(assisted.findings)} · "
+            f"fidelity: {assisted.fidelity_score:.0%}"
+        )
+        if assisted.findings:
+            for finding in assisted.findings:
+                st.caption(
+                    f"{finding.type.value} @ step {finding.expected_step_index} "
+                    f"(ts {_ms_to_timestamp(finding.evidence_timestamp_ms)}; "
+                    f"obs {finding.observed_action_index})"
+                )
+        else:
+            st.caption("No findings.")
 
 
 def _stage4_completion_message(report: CrossCheckReport) -> str:
@@ -540,6 +823,23 @@ def _render_results(audit_result: AuditResult, expected_trace: ExpectedTrace) ->
     st.divider()
     _render_findings(audit_result)
 
+    stage3_assist = st.session_state.get("stage3_assist")
+    deterministic_stage3 = st.session_state.get("deterministic_stage3")
+    assisted_stage3 = st.session_state.get("assisted_stage3")
+    if (
+        stage3_assist is not None
+        and deterministic_stage3 is not None
+        and assisted_stage3 is not None
+    ):
+        st.divider()
+        _render_stage3_assist_panel(
+            assist=stage3_assist,
+            deterministic=deterministic_stage3,
+            assisted=assisted_stage3,
+            token_usage=st.session_state.get("stage3_token_usage"),
+            observed=st.session_state.get("observed_trace"),
+        )
+
     semantic_diagnostics = st.session_state.get("semantic_diagnostics")
     crosscheck_verdicts = st.session_state.get("crosscheck")
     if semantic_diagnostics or crosscheck_verdicts:
@@ -596,6 +896,10 @@ def _render_debug_panel() -> None:
         else:
             st.markdown("**Stage 3 — Audit Result:** not available")
 
+        if debug.get("stage3_assist"):
+            st.markdown("**Stage 3 — Assist Report**")
+            st.code(debug["stage3_assist"], language="json")
+
         if debug.get("crosscheck"):
             st.markdown("**Stage 4 — Cross-check Report (verdicts + refined result)**")
             st.code(debug["crosscheck"], language="json")
@@ -627,6 +931,7 @@ def _run_pipeline(
     video_name: str,
     scenario_text: str,
     run_crosscheck: bool,
+    stage3_mode: str = STAGE3_MODE_DETERMINISTIC,
 ) -> tuple[AuditResult, ExpectedTrace] | None:
     """Run Stage 1 → Stage 2 → Stage 3 (→ optional cross-check) with a live status widget.
 
@@ -636,12 +941,29 @@ def _run_pipeline(
     returned AuditResult is the refined one.
     Intermediate results and full tracebacks are written to st.session_state["debug"]
     so the debug panel can display them regardless of whether the run succeeded.
+
+    stage3_mode selects Deterministic (default: align()) or experimental LLM-assisted
+    (align_with_assist). Assisted mode is UI-only; accepted resolutions are passed to
+    Stage 4 as skip_semantic_pairs.
     """
-    debug: dict = {"stage1": None, "stage2": None, "stage3": None, "crosscheck": None, "errors": []}
+    debug: dict = {
+        "stage1": None,
+        "stage2": None,
+        "stage3": None,
+        "stage3_assist": None,
+        "crosscheck": None,
+        "errors": [],
+    }
     st.session_state["debug"] = debug
     st.session_state["crosscheck"] = None
     st.session_state["semantic_diagnostics"] = None
     st.session_state["export"] = None
+    st.session_state["stage3_mode"] = stage3_mode
+    st.session_state["stage3_assist"] = None
+    st.session_state["deterministic_stage3"] = None
+    st.session_state["assisted_stage3"] = None
+    st.session_state["stage3_token_usage"] = None
+    st.session_state["observed_trace"] = None
     latency = LatencyMetrics()
     pipeline_started = monotonic_ms()
 
@@ -702,32 +1024,116 @@ def _run_pipeline(
             )
 
             # ── Stage 3: align traces ─────────────────────────────────────────
-            st.write("Stage 3 — Aligning expected and observed traces")
             stage3_started = monotonic_ms()
-            original_audit_result = align(expected_trace, observed_trace)
-            audit_result = original_audit_result
+            skip_semantic_pairs: set[tuple[int, int]] | None = None
+            deterministic_stage3: AuditResult | None = None
+            assisted_stage3: AuditResult | None = None
+            stage3_assist: AssistReport | None = None
+            stage3_token_usage: dict[str, Any] | None = None
+
+            if stage3_mode in {STAGE3_MODE_ASSISTED, STAGE3_MODE_EVIDENCE}:
+                evidence_aware = stage3_mode == STAGE3_MODE_EVIDENCE
+                # Stage 2C expected-guided frame evidence runs with evidence-aware mode.
+                frame_evidence = evidence_aware
+                frame_manifest = None
+                if frame_evidence and observed_trace.actions:
+                    timestamps = sorted({
+                        action.timestamp_ms for action in observed_trace.actions
+                    })
+                    if timestamps:
+                        frame_manifest = build_frame_manifest(timestamps)
+                mode_label = (
+                    f"LLM assist + evidence-aware + Stage 2C ({ALIGN_ASSIST_MODEL})"
+                    if evidence_aware
+                    else f"LLM assist ({ALIGN_ASSIST_MODEL})"
+                )
+                st.write(f"Stage 3 — Aligning with {mode_label}")
+
+                def _on_assist_retry(attempt: int, code: int, delay_s: float) -> None:
+                    st.write(
+                        f"⏳ Assist model is busy (HTTP {code}) — "
+                        f"retry {attempt} in {delay_s:.0f}s…"
+                    )
+
+                assist_tracker = _AssistUsageTracker(make_openai_client())
+                assisted_bundle = align_with_assist(
+                    expected_trace,
+                    observed_trace,
+                    openai_client=assist_tracker,
+                    model=ALIGN_ASSIST_MODEL,
+                    on_retry=_on_assist_retry,
+                    evidence_aware=evidence_aware,
+                    frame_evidence=frame_evidence,
+                    frame_manifest=frame_manifest,
+                    frame_video_path=tmp_path if frame_evidence else None,
+                )
+                deterministic_stage3 = assisted_bundle.deterministic_result
+                assisted_stage3 = assisted_bundle.result
+                stage3_assist = assisted_bundle.assist
+                original_audit_result = assisted_stage3
+                audit_result = original_audit_result
+                skip_semantic_pairs = _reviewed_skip_pairs(stage3_assist)
+                stage3_token_usage = _assist_token_usage_summary(assist_tracker.requests)
+                debug["stage3_assist"] = stage3_assist.model_dump_json(indent=2)
+                st.session_state["stage3_assist"] = stage3_assist
+                st.session_state["deterministic_stage3"] = deterministic_stage3
+                st.session_state["assisted_stage3"] = assisted_stage3
+                st.session_state["stage3_token_usage"] = stage3_token_usage
+                assist_tag = (
+                    "LLM-assisted evidence-aware"
+                    if evidence_aware
+                    else "LLM-assisted"
+                )
+                stage2c_note = ""
+                if frame_evidence:
+                    n_cand = (
+                        len(stage3_assist.candidate_evidence.candidates)
+                        if stage3_assist.candidate_evidence is not None
+                        else 0
+                    )
+                    stage2c_note = f"; Stage 2C candidates {n_cand}"
+                st.write(
+                    f"Stage 3 complete ({assist_tag}) — "
+                    f"fidelity score: {audit_result.fidelity_score:.0%}, "
+                    f"{len(audit_result.findings)} finding(s); "
+                    f"accepted {stage3_assist.metrics.proposals_accepted}, "
+                    f"LLM requests {stage3_assist.metrics.llm_request_count}"
+                    f"{stage2c_note}"
+                )
+            else:
+                st.write("Stage 3 — Aligning expected and observed traces")
+                original_audit_result = align(expected_trace, observed_trace)
+                audit_result = original_audit_result
+                st.write(
+                    f"Stage 3 complete — fidelity score: {audit_result.fidelity_score:.0%}, "
+                    f"{len(audit_result.findings)} finding(s)"
+                )
+
             latency.stage3_ms = elapsed_ms(stage3_started)
             logger.info(
-                "stage3 duration_ms=%.1f finding_count=%d",
+                "stage3 duration_ms=%.1f finding_count=%d mode=%s",
                 latency.stage3_ms,
                 len(audit_result.findings),
+                stage3_mode,
             )
             debug["stage3"] = audit_result.model_dump_json(indent=2)
-            st.write(
-                f"Stage 3 complete — fidelity score: {audit_result.fidelity_score:.0%}, "
-                f"{len(audit_result.findings)} finding(s)"
-            )
+            st.session_state["observed_trace"] = observed_trace
 
             # ── Stage 4 (optional): cross-check pass ──────────────────────────
             crosscheck_report: CrossCheckReport | None = None
             if run_crosscheck:
                 st.write("Stage 4 — Cross-checking assertions and low-confidence steps")
+                skip_visual_steps: set[int] | None = None
+                if stage3_assist is not None and stage3_assist.stage2c_skip_visual_steps:
+                    skip_visual_steps = set(stage3_assist.stage2c_skip_visual_steps)
                 with latency_scope(latency):
                     crosscheck_report = run_cross_check(
                         expected_trace,
                         observed_trace,
                         audit_result,
                         tmp_path,
+                        skip_semantic_pairs=skip_semantic_pairs,
+                        skip_visual_steps=skip_visual_steps,
                     )
                 debug["crosscheck"] = crosscheck_report.model_dump_json(indent=2)
                 audit_result = crosscheck_report.refined_result
@@ -762,6 +1168,11 @@ def _run_pipeline(
             observed_trace=observed_trace,
             crosscheck_report=crosscheck_report,
             latency_metrics=_latency_export_payload(latency),
+            stage3_mode=stage3_mode,
+            deterministic_stage3=deterministic_stage3,
+            assisted_stage3=assisted_stage3,
+            stage3_assist=stage3_assist,
+            stage3_token_usage=stage3_token_usage,
         )
         status.update(label="Audit complete", state="complete", expanded=False)
 
@@ -794,7 +1205,8 @@ def main() -> None:
     st.caption(
         "Verify that a UI test recording faithfully demonstrates its expected scenario. "
         "Stage 1 parses the scenario into a structured trace; Stage 2 extracts what "
-        "actually happened in the video; Stage 3 aligns the two traces deterministically."
+        "actually happened in the video; Stage 3 aligns the two traces (deterministic by "
+        "default, with an optional experimental LLM-assisted mode)."
     )
 
     st.divider()
@@ -831,6 +1243,27 @@ def main() -> None:
             line_count = len([line for line in scenario_text.splitlines() if line.strip()])
             st.caption(f"{line_count} non-empty line(s)")
 
+    stage3_mode = st.radio(
+        "Stage 3 alignment mode",
+        options=[
+            STAGE3_MODE_DETERMINISTIC,
+            STAGE3_MODE_ASSISTED,
+            STAGE3_MODE_EVIDENCE,
+        ],
+        index=0,
+        horizontal=True,
+        help=(
+            "Deterministic (default) uses the existing align() path. "
+            f"LLM-assisted (experimental) calls align_with_assist() with "
+            f"{ALIGN_ASSIST_MODEL}; Claude proposes, Python validates before apply. "
+            "Evidence-aware also retrieves multi-observation windows for coarse steps, "
+            "asks Claude to label initiation/progress/completion/distractor roles, and "
+            "runs Stage 2C expected-guided frame evidence discovery (frame IDs only; "
+            "Python validates timestamps). Initiation alone never clears assertions. "
+            "Only accepted resolutions are excluded from Stage 4 semantic review."
+        ),
+    )
+
     run_crosscheck = st.checkbox(
         "Run cross-check pass (second model)",
         value=True,
@@ -866,6 +1299,7 @@ def main() -> None:
             video_name=uploaded_file.name,
             scenario_text=scenario_text,
             run_crosscheck=run_crosscheck,
+            stage3_mode=stage3_mode,
         )
         if outcome is not None:
             st.session_state["result"] = outcome

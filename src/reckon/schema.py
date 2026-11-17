@@ -36,6 +36,199 @@ class ActionType(str, Enum):
 # Expected trace — parsed from the scenario / test case text
 # ---------------------------------------------------------------------------
 
+class StepSource(str, Enum):
+    """Where an expected step came from in Stage 1 modeling."""
+
+    scenario = "scenario"
+    macro = "macro"
+
+
+class StepObligation(str, Enum):
+    """Whether a macro-derived step is required or conditional."""
+
+    mandatory = "mandatory"
+    conditional = "conditional"
+    explicit = "explicit"
+
+
+class MacroMemberDecision(BaseModel):
+    """One expansion decision recorded for provenance / audits."""
+
+    member_id: str = Field(description="Registry member slot identifier")
+    decision: str = Field(
+        description=(
+            "Outcome such as emitted, annotated_existing, "
+            "skipped_explicit_cover, suppressed_by_negation, "
+            "not_expanded_insufficient_detail"
+        )
+    )
+    detail: Optional[str] = Field(
+        None,
+        description="Optional human-readable reason for the decision",
+    )
+
+
+class MacroApplicationRecord(BaseModel):
+    """Provenance for one Domain Macro application on an ExpectedTrace."""
+
+    macro_id: str
+    version: str
+    domain: str
+    source_text: Optional[str] = Field(
+        None,
+        description="Scenario span / raw_text that triggered the macro",
+    )
+    decisions: list[MacroMemberDecision] = Field(default_factory=list)
+
+
+class IntentOperation(str, Enum):
+    """UI operation on a structured intent. Not an English verb."""
+
+    activate = "activate"
+    enter = "enter"
+    choose = "choose"
+    traverse = "traverse"
+    dismiss = "dismiss"
+    assert_ = "assert"
+    unspecified = "unspecified"
+
+
+class ObjectKind(str, Enum):
+    application = "application"
+    control = "control"
+    field = "field"
+    option = "option"
+    page = "page"
+    dialog = "dialog"
+    text = "text"
+    button = "button"
+    link = "link"
+    icon = "icon"
+    menu_item = "menu_item"
+    unspecified = "unspecified"
+
+
+class ElementKind(str, Enum):
+    icon = "icon"
+    button = "button"
+    link = "link"
+    menu_item = "menu_item"
+    field = "field"
+    option = "option"
+    page = "page"
+    dialog = "dialog"
+    text = "text"
+    control = "control"
+    application = "application"
+    unspecified = "unspecified"
+
+
+class CitationSurface(str, Enum):
+    target = "target"
+    input_value = "input_value"
+    visible_text = "visible_text"
+
+
+class SlotCitation(BaseModel):
+    """Exact slice of an original source string. ``end`` is exclusive."""
+
+    start: int = Field(ge=0)
+    end: int = Field(ge=0)
+    text: str
+
+    @model_validator(mode="after")
+    def end_is_exclusive(self) -> "SlotCitation":
+        if self.end <= self.start:
+            raise ValueError("citation end must be greater than start")
+        if len(self.text) != self.end - self.start:
+            raise ValueError("citation text length must equal end - start")
+        return self
+
+
+class ExpectedObject(BaseModel):
+    kind: ObjectKind = ObjectKind.unspecified
+    kind_citation: Optional[SlotCitation] = None
+    name: Optional[str] = None
+    name_citation: Optional[SlotCitation] = None
+    product: Optional[str] = None
+    product_citation: Optional[SlotCitation] = None
+    instance: Optional[str] = None
+    instance_citation: Optional[SlotCitation] = None
+    value: Optional[str] = None
+    value_citation: Optional[SlotCitation] = None
+
+
+class ExpectedActionIntent(BaseModel):
+    """Structured expected intent. Offsets refer to the original scenario text."""
+
+    schema_version: str = "1"
+    operation: IntentOperation = IntentOperation.unspecified
+    operation_citation: Optional[SlotCitation] = None
+    object: ExpectedObject = Field(default_factory=ExpectedObject)
+    sentence_start: int = Field(ge=0)
+    sentence_end: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def sentence_bounds(self) -> "ExpectedActionIntent":
+        if self.sentence_end <= self.sentence_start:
+            raise ValueError("sentence_end must be greater than sentence_start")
+        return self
+
+
+class ObservedElement(BaseModel):
+    kind: ElementKind = ElementKind.unspecified
+    kind_citation: Optional[SlotCitation] = None
+    name: Optional[str] = None
+    name_citation: Optional[SlotCitation] = None
+    product: Optional[str] = None
+    product_citation: Optional[SlotCitation] = None
+    instance: Optional[str] = None
+    instance_citation: Optional[SlotCitation] = None
+    value: Optional[str] = None
+    value_citation: Optional[SlotCitation] = None
+
+
+class ObservedInteraction(BaseModel):
+    """Structured observation. Citations point into one stored surface, not screen_description."""
+
+    schema_version: str = "1"
+    operation: IntentOperation = IntentOperation.unspecified
+    operation_citation: Optional[SlotCitation] = None
+    element: ObservedElement = Field(default_factory=ObservedElement)
+    citation_surface: CitationSurface
+    cited_frame_index: int = Field(ge=1)
+    context_episode_id: Optional[int] = Field(
+        default=None,
+        description="Screen episode for review. Not a control identity.",
+    )
+
+
+class EquivalenceMatch(BaseModel):
+    """One accepted action realization. The observation id and timestamp are the proof."""
+
+    relation_id: str
+    expected_step_index: int = Field(ge=1)
+    terminal_observed_index: int = Field(ge=1)
+    evidence_timestamp_ms: int = Field(ge=0)
+    evidence_id: str
+    cited_frame_index: int = Field(ge=1)
+    evidence_kind: str = "action"
+    compared_slots: list[str] = Field(default_factory=list)
+    context_episode_id: Optional[int] = None
+
+
+class EquivalenceDecision(BaseModel):
+    """One Base assignment outcome. Agent fields are filled only after Base commits."""
+
+    expected_step_index: int = Field(ge=1)
+    status: str
+    observed_index: Optional[int] = None
+    relation_id: Optional[str] = None
+    agent_status: Optional[str] = None
+    agent_observed_index: Optional[int] = None
+    agent_rejection: Optional[str] = None
+
+
 class ExpectedStep(BaseModel):
     index: int = Field(ge=1, description="1-based position in the scenario")
     action: ActionType
@@ -59,9 +252,30 @@ class ExpectedStep(BaseModel):
         None,
         description="The original sentence or Gherkin line this step was parsed from",
     )
+    source: StepSource = Field(
+        default=StepSource.scenario,
+        description="Whether this step came from scenario text or macro expansion",
+    )
+    macro_id: Optional[str] = Field(
+        None,
+        description="Domain macro ID when source is macro",
+    )
+    macro_version: Optional[str] = Field(
+        None,
+        description="Domain macro version when source is macro",
+    )
+    obligation: Optional[StepObligation] = Field(
+        None,
+        description="mandatory / conditional / explicit when macro-derived",
+    )
+    action_intent: Optional[ExpectedActionIntent] = Field(
+        default=None,
+        description="Structured intent with citations into the original scenario. Unset on legacy traces.",
+    )
 
     _normalize_blanks = field_validator(
         "target", "input_value", "assertion", "preconditions", "raw_text",
+        "macro_id", "macro_version",
         mode="before",
     )(_blank_str_to_none)
 
@@ -69,6 +283,14 @@ class ExpectedStep(BaseModel):
 class ExpectedTrace(BaseModel):
     scenario_title: str
     steps: list[ExpectedStep]
+    source_text: Optional[str] = Field(
+        default=None,
+        description="Original scenario input. Citation offsets refer to this string.",
+    )
+    macros_applied: list[MacroApplicationRecord] = Field(
+        default_factory=list,
+        description="Domain macros applied during Stage 1 (opt-in provenance)",
+    )
 
     @model_validator(mode="after")
     def steps_must_be_sequential(self) -> "ExpectedTrace":
@@ -120,6 +342,10 @@ class ObservedAction(BaseModel):
     screen_description: Optional[str] = Field(
         None,
         description="Brief description of the screen state at this moment",
+    )
+    interaction: Optional[ObservedInteraction] = Field(
+        default=None,
+        description="Structured interaction with citations into target, input_value, or visible_text.",
     )
 
     _normalize_blanks = field_validator(
@@ -225,6 +451,38 @@ class StepVerdict(BaseModel):
         default_factory=list,
         description="Finding types raised for this step; empty if passed",
     )
+    cleared_by_assist: bool = Field(
+        default=False,
+        description=(
+            "True when Stage 3 assist cleared findings on this step. "
+            "Stage 4 may still visually review low-confidence clears."
+        ),
+    )
+    assist_confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="LLM confidence for the assist clear, when applicable",
+    )
+    recovery_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "How this step's evidence was selected "
+            "(e.g. later_observed_action, frame_evidence)"
+        ),
+    )
+    evidence_id: Optional[str] = Field(
+        default=None,
+        description="Id of the evidence this verdict uses, such as O3 or F4,F5",
+    )
+    frame_ids: list[str] = Field(
+        default_factory=list,
+        description="Frame ids when the evidence is frame text",
+    )
+    explanation: Optional[str] = Field(
+        default=None,
+        description="Why this evidence was selected. It refers to evidence_id and evidence_timestamp_ms.",
+    )
 
 
 class AuditResult(BaseModel):
@@ -245,6 +503,10 @@ class AuditResult(BaseModel):
     )
     findings: list[Finding]
     step_verdicts: list[StepVerdict]
+    equivalence_decisions: list[EquivalenceDecision] = Field(
+        default_factory=list,
+        description="Base equivalence assignment. Empty when no structured intent was present.",
+    )
 
     @property
     def critical_findings(self) -> list[Finding]:
@@ -285,6 +547,14 @@ class CrossCheckVerdict(BaseModel):
     observed_action_index: Optional[int] = Field(
         None,
         description="1-based observed action this check relates to, if any",
+    )
+    supporting_frame_timestamp_ms: Optional[int] = Field(
+        None,
+        ge=0,
+        description=(
+            "Absolute millisecond offset of the frame that directly supported a "
+            "present answer, when the model named one"
+        ),
     )
 
 
@@ -351,6 +621,288 @@ class CrossCheckReport(BaseModel):
     verdicts: list[CrossCheckVerdict]
     refined_result: AuditResult
     semantic_diagnostics: list[SemanticDiagnostic] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 episodes — temporal clusters of observed micro-actions
+# ---------------------------------------------------------------------------
+
+class ScreenEpisode(BaseModel):
+    """A contiguous screen state spanning one or more ObservedAction items."""
+
+    episode_id: int = Field(ge=1)
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    start_index: int = Field(ge=1)
+    end_index: int = Field(ge=1)
+    screen_summary: str = Field(
+        description="Representative screen/target description for the episode",
+    )
+    visible_texts: list[str] = Field(default_factory=list)
+    actions_summary: list[str] = Field(
+        default_factory=list,
+        description="Short action labels (action on target) inside the episode",
+    )
+    is_ambient_system: bool = Field(
+        default=False,
+        description=(
+            "True when the episode looks like an OS-level interaction "
+            "(notification shade, lock screen, system UI)"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def bounds_must_be_ordered(self) -> "ScreenEpisode":
+        if self.end_ms < self.start_ms:
+            raise ValueError(
+                f"end_ms ({self.end_ms}) must be >= start_ms ({self.start_ms})"
+            )
+        if self.end_index < self.start_index:
+            raise ValueError(
+                f"end_index ({self.end_index}) must be >= start_index "
+                f"({self.start_index})"
+            )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 LLM assist — optional semantic matching on top of deterministic align()
+# ---------------------------------------------------------------------------
+
+class AssistCandidateKind(str, Enum):
+    """Kinds handled by the Stage 3 assistant.
+
+    evidence_bundle is the experimental many-observation support path. It does not
+    change deterministic align(); it only runs when callers opt into evidence-aware
+    assist.
+
+    episode_verification remaps a DP-anchored (or unmatched) assertion step onto
+    the terminal ObservedAction inside a proving ScreenEpisode.
+
+    frame_evidence is Stage 2C expected-guided frame evidence accepted only after
+    Python validation against the frame manifest.
+    """
+
+    wrong_target = "wrong_target"
+    delayed_assertion = "delayed_assertion"
+    evidence_bundle = "evidence_bundle"
+    episode_verification = "episode_verification"
+    frame_evidence = "frame_evidence"
+
+
+class CandidateEvidenceType(str, Enum):
+    """What a Stage 2C candidate claims to show in frames."""
+
+    ACTION = "ACTION"
+    ASSERTION_OUTCOME = "ASSERTION_OUTCOME"
+
+
+class CandidateSearchStatus(str, Enum):
+    """LLM search outcome for one expected step — never a pass/fail verdict."""
+
+    candidate_found = "candidate_found"
+    not_found = "not_found"
+    ambiguous = "ambiguous"
+
+
+class CandidateValidationStatus(str, Enum):
+    """Python validation outcome for a Stage 2C candidate."""
+
+    accepted = "accepted"
+    rejected = "rejected"
+
+
+class FrameManifestEntry(BaseModel):
+    """One labelled frame and its authoritative decoder timestamp."""
+
+    frame_id: str = Field(min_length=1, description="Label such as F1, F2")
+    timestamp_ms: int = Field(ge=0)
+
+
+class FrameManifest(BaseModel):
+    """Authoritative frame_id → timestamp map. LLM never invents times."""
+
+    frames: list[FrameManifestEntry] = Field(min_length=1)
+
+    def timestamp_for(self, frame_id: str) -> int | None:
+        key = frame_id.strip().upper()
+        for entry in self.frames:
+            if entry.frame_id.strip().upper() == key:
+                return entry.timestamp_ms
+        return None
+
+    def known_ids(self) -> set[str]:
+        return {entry.frame_id.strip().upper() for entry in self.frames}
+
+
+class CandidateEvidenceItem(BaseModel):
+    """One expected-guided evidence candidate after Python materialization/validation."""
+
+    expected_step_id: str = Field(min_length=1, description="Stable id such as E5")
+    expected_step_index: int = Field(ge=1)
+    frame_ids: list[str] = Field(default_factory=list)
+    timestamp_start_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description="Python-derived from frame manifest; None when frames invalid",
+    )
+    timestamp_end_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description="Python-derived from frame manifest; None when frames invalid",
+    )
+    evidence_type: CandidateEvidenceType
+    observed_description: str = Field(default="")
+    visible_text: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    search_status: CandidateSearchStatus
+    validation_status: CandidateValidationStatus
+    rejection_reason: str | None = Field(
+        default=None,
+        description="Explicit reason when rejected; required for auditability",
+    )
+
+    @model_validator(mode="after")
+    def rejected_must_have_reason(self) -> "CandidateEvidenceItem":
+        if (
+            self.validation_status == CandidateValidationStatus.rejected
+            and not (self.rejection_reason or "").strip()
+        ):
+            raise ValueError("rejected candidates require rejection_reason")
+        if (
+            self.timestamp_start_ms is not None
+            and self.timestamp_end_ms is not None
+            and self.timestamp_end_ms < self.timestamp_start_ms
+        ):
+            raise ValueError("timestamp_end_ms must be >= timestamp_start_ms")
+        return self
+
+
+class CandidateEvidenceTrace(BaseModel):
+    """Stage 2C output: candidate evidence only — never a verdict."""
+
+    source_file: str = Field(description="Recording identifier matching ObservedTrace")
+    candidates: list[CandidateEvidenceItem] = Field(default_factory=list)
+
+
+class EvidenceRole(str, Enum):
+    """Role of one observed action inside an evidence-aware support window."""
+
+    initiation = "initiation"
+    progress = "progress"
+    completion = "completion"
+    assertion_evidence = "assertion_evidence"
+    distractor = "distractor"
+
+
+class AssistProposalStatus(str, Enum):
+    accepted = "accepted"
+    rejected = "rejected"
+    skipped = "skipped"
+    failed = "failed"
+
+
+class AssistMatchMethod(str, Enum):
+    deterministic = "deterministic"
+    llm_assisted = "llm_assisted"
+    unresolved = "unresolved"
+    rejected_proposal = "rejected_proposal"
+
+
+class AssistReviewedPair(BaseModel):
+    """A Stage 3-assisted pair Stage 4 semantic review should not re-ask."""
+
+    expected_step_index: int = Field(ge=1)
+    observed_action_index: int = Field(ge=1)
+    confidence: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Assist confidence for this pair. Stage 4 semantic skip requires "
+            ">= 0.85 for LLM-assisted pairs; deterministic clears omit this."
+        ),
+    )
+
+
+class AssistProposalRecord(BaseModel):
+    """Audit trail for one assist candidate: accepted, rejected, skipped, or failed."""
+
+    kind: AssistCandidateKind
+    status: AssistProposalStatus
+    expected_step_index: int = Field(ge=1)
+    matched_observed_index: int | None = None
+    supporting_observed_index: int | None = None
+    initiation_observed_index: int | None = None
+    completion_observed_index: int | None = None
+    finding_types: list[FindingType] = Field(default_factory=list)
+    model_answer: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    rationale: str | None = None
+    reason: str | None = None
+    matching_method: AssistMatchMethod
+    challenged_false_pass: bool = False
+    evidence_timestamp_ms: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Python-derived evidence timestamp for frame_evidence clears "
+            "(never LLM-invented)"
+        ),
+    )
+    frame_ids: list[str] = Field(
+        default_factory=list,
+        description="Stage 2C frame labels that grounded this proposal",
+    )
+    candidate_evidence_type: CandidateEvidenceType | None = Field(
+        default=None,
+        description="ACTION or ASSERTION_OUTCOME when kind is frame_evidence",
+    )
+
+
+class AssistMetrics(BaseModel):
+    """Numeric Stage 3 assist diagnostics — counts and durations only."""
+
+    expected_event_count: int = Field(ge=0)
+    observed_event_count: int = Field(ge=0)
+    deterministic_match_count: int = Field(ge=0)
+    candidate_count: int = Field(ge=0)
+    llm_request_count: int = Field(ge=0)
+    proposals_accepted: int = Field(ge=0)
+    proposals_rejected: int = Field(ge=0)
+    unresolved_count: int = Field(ge=0)
+    deterministic_ms: float = Field(ge=0.0)
+    llm_ms: float = Field(ge=0.0)
+    total_ms: float = Field(ge=0.0)
+
+
+class AssistReport(BaseModel):
+    """Diagnostics for one align_with_assist run. Never replaces AuditResult alone."""
+
+    model: str
+    proposals: list[AssistProposalRecord] = Field(default_factory=list)
+    metrics: AssistMetrics
+    reviewed_semantic_pairs: list[AssistReviewedPair] = Field(default_factory=list)
+    error: str | None = None
+    candidate_evidence: CandidateEvidenceTrace | None = Field(
+        default=None,
+        description="Stage 2C candidate trace when frame_evidence assist ran",
+    )
+    stage2c_skip_visual_steps: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Expected step indices whose Stage 2C ASSERTION_OUTCOME evidence "
+            "was accepted at high confidence; Stage 4 may skip redundant visual recheck"
+        ),
+    )
+
+
+class AssistedAlignResult(BaseModel):
+    """Opt-in Stage 3 output: deterministic baseline plus validated assisted result."""
+
+    deterministic_result: AuditResult
+    result: AuditResult
+    assist: AssistReport
 
 
 def merge_observed_chunks(chunks: list[ObservedTrace]) -> ObservedTrace:

@@ -23,6 +23,7 @@ from pathlib import Path
 
 import instructor
 
+from reckon import config
 from reckon.extractor import EXTRACTION_MODEL, extract_window
 from reckon.keyframes import detect_change_events, video_duration_ms
 from reckon.latency import (
@@ -34,6 +35,12 @@ from reckon.latency import (
 )
 from reckon.retry import RetryCallback
 from reckon.schema import ObservedTrace, merge_observed_chunks
+from reckon.stage2.adaptive_sampling import (
+    AdaptiveSamplingState,
+    densify_window_frames,
+    frames_were_densified,
+    update_adaptive_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,12 +217,29 @@ def extract_observed_trace(
         latency.window_count = len(windows)
 
     stage2b_started = monotonic_ms()
-    chunks = [
-        extract_window(
+    use_adaptive = config.STAGE2_ADAPTIVE_SAMPLING_POLICY == "choice_control"
+    adaptive_state = AdaptiveSamplingState()
+    chunks: list[ObservedTrace] = []
+
+    for index, (start, end) in enumerate(windows):
+        frames = select_window_frames(
+            start, end, change_events, max_frames=max_frames_per_window
+        )
+        if use_adaptive and adaptive_state.active:
+            frames = densify_window_frames(
+                frames,
+                start,
+                end,
+                interval_ms=config.STAGE2_ADAPTIVE_SAMPLE_INTERVAL_MS,
+                max_extra_frames=config.STAGE2_ADAPTIVE_MAX_EXTRA_FRAMES,
+                max_frames=config.STAGE2_ADAPTIVE_MAX_FRAMES_PER_WINDOW,
+            )
+
+        chunk = extract_window(
             openai_client,
             video_path,
             source_file,
-            select_window_frames(start, end, change_events, max_frames=max_frames_per_window),
+            frames,
             clip_offset_ms=start,
             clip_end_ms=end,
             model=model,
@@ -223,8 +247,48 @@ def extract_observed_trace(
             latency=latency,
             window_index=index,
         )
-        for index, (start, end) in enumerate(windows)
-    ]
+
+        if use_adaptive:
+            was_active = adaptive_state.active
+            adaptive_state = update_adaptive_state(
+                adaptive_state,
+                chunk.actions,
+                window_start_ms=start,
+                interaction_window_ms=config.STAGE2_ADAPTIVE_INTERACTION_WINDOW_MS,
+            )
+            # Newly detected choice-control screen: densify this same window once
+            # so intermediate checkbox transitions are not deferred to the next window.
+            if adaptive_state.active and not was_active:
+                denser = densify_window_frames(
+                    frames,
+                    start,
+                    end,
+                    interval_ms=config.STAGE2_ADAPTIVE_SAMPLE_INTERVAL_MS,
+                    max_extra_frames=config.STAGE2_ADAPTIVE_MAX_EXTRA_FRAMES,
+                    max_frames=config.STAGE2_ADAPTIVE_MAX_FRAMES_PER_WINDOW,
+                )
+                if frames_were_densified(frames, denser):
+                    chunk = extract_window(
+                        openai_client,
+                        video_path,
+                        source_file,
+                        denser,
+                        clip_offset_ms=start,
+                        clip_end_ms=end,
+                        model=model,
+                        on_retry=retry_callback,
+                        latency=latency,
+                        window_index=index,
+                    )
+                    adaptive_state = update_adaptive_state(
+                        adaptive_state,
+                        chunk.actions,
+                        window_start_ms=start,
+                        interaction_window_ms=config.STAGE2_ADAPTIVE_INTERACTION_WINDOW_MS,
+                    )
+
+        chunks.append(chunk)
+
     if latency is not None:
         latency.stage2b_ms = elapsed_ms(stage2b_started)
         logger.info(

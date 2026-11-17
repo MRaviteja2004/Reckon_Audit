@@ -1,0 +1,41 @@
+{
+  "scenario_title": "Onboarding milestones to Hub",
+  "steps": [
+    {
+      "index": 1,
+      "action": "other",
+      "target": "Security Number",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "After the Onboarding process like- Security Number, Start Earn, vehicle user should land on Hub screen."
+    },
+    {
+      "index": 2,
+      "action": "other",
+      "target": "Start Earn",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "After the Onboarding process like- Security Number, Start Earn, vehicle user should land on Hub screen."
+    },
+    {
+      "index": 3,
+      "action": "other",
+      "target": "vehicle",
+      "input_value": null,
+      "assertion": null,
+      "preconditions": null,
+      "raw_text": "After the Onboarding process like- Security Number, Start Earn, vehicle user should land on Hub screen."
+    },
+    {
+      "index": 4,
+      "action": "assert_visible",
+      "target": "Hub screen",
+      "input_value": null,
+      "assertion": "user should land on Hub screen.",
+      "preconditions": "Onboarding process (Security Number, Start Earn, vehicle) completed",
+      "raw_text": "After the Onboarding process like- Security Number, Start Earn, vehicle user should land on Hub screen."
+    }
+  ]
+}

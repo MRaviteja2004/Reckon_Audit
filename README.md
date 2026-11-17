@@ -71,19 +71,20 @@ All configuration lives in `.env`. Copy `.env.example` to get started — it doc
 | Variable | Required | Description |
 |---|---|---|
 | `USSO_TOKEN` | Yes | USSO token used by every model stage through Uber AI Gateway |
-| `OPENAI_MODEL` | No | Model for Stage 1 scenario parsing. Default: `gpt-5.5` |
-| `EXTRACTION_MODEL` | No | Vision-capable model for Stage 2 frame extraction. Default: `gpt-5.5` |
-| `CROSSCHECK_MODEL` | No | Vision-capable model for the Stage 4 cross-check. Default: `gpt-5.5` |
+| `GENAI_BASE_URL` | No | Uber AI Gateway base URL. Default: `https://genai-api.uberinternal.com/v1` |
+| `OPENAI_MODEL` | No | Model for Stage 1 scenario parsing. Default: `claude-opus-5-5` |
+| `EXTRACTION_MODEL` | No | Vision-capable model for Stage 2 frame extraction. Default: `claude-opus-5-5` |
+| `CROSSCHECK_MODEL` | No | Vision-capable model for the Stage 4 cross-check. Default: `claude-opus-5-5` |
 
 > `.env` is gitignored. Never commit it.
 
-All model requests use `https://genai-api.uberinternal.com/v1`; there is no public
-OpenAI endpoint fallback.
+All model requests use `USSO_TOKEN` against the Uber AI Gateway (`GENAI_BASE_URL` or
+its default); there is no public OpenAI endpoint fallback and no separate API keys.
 
 ### Model notes
 
 - **Vision is required.** `EXTRACTION_MODEL` and `CROSSCHECK_MODEL` are both sent images and must be vision-capable. A key that works for text can still fail here — `scripts/verify_openai.py <recording>` checks the vision path specifically.
-- **Temperature.** The GPT-5 family (default `gpt-5.5`) accepts only its default temperature, so the pipeline omits the `temperature` parameter rather than sending `0`. Older models that support `temperature=0` still work and can be pinned via the API.
+- **Temperature.** Some gateway models accept only their default temperature, so the pipeline omits the `temperature` parameter rather than sending `0`. Models that support `temperature=0` can still be pinned via the API.
 - **Retries.** Stages 2 and 4 automatically retry transient `429`/`5xx` responses, honoring machine-readable gateway retry headers and otherwise using bounded exponential backoff; only a sustained outage surfaces as an error.
 - **Why not Gemini.** Gemini leads on general video benchmarks and was the original Stage 2 provider. Neither OpenAI nor Anthropic accepts video via API, but that turned out not to matter: those benchmarks measure natural video, while a screen recording is static but for discrete changes. Decoding locally gives exact timestamps, no OCR downsampling, and a free change-detection pass — see [Stage 2](#how-it-works) above.
 
@@ -332,10 +333,10 @@ PYTHONPATH=src python scripts/verify_openai.py recording.mp4
 
 Expected output:
 ```
-Text OK    — gpt-5.5 replied 'ok'
+Text OK    — claude-opus-5-5 replied 'ok'
 Decode OK  — 7 change event(s) found in recording.mp4
 Frame OK   — decoded frame at 1030ms (68421 bytes JPEG)
-Vision OK  — gpt-5.5 replied 'Login page with error'
+Vision OK  — claude-opus-5-5 replied 'Login page with error'
 ```
 
 ---
@@ -447,8 +448,8 @@ Produced by `reckon.crosscheck.run_cross_check`.
 
 **`CrossCheckTarget`** — a single thing to re-examine (`kind` is `assertion` or `low_confidence`) with the frame window (`window_start_ms`, `window_end_ms`). **`CrossCheckReport`** — the pass output: `verdicts: list[CrossCheckVerdict]` plus `refined_result: AuditResult`.
 
-### `parse_scenario(scenario_text, *, openai_client=None, model="gpt-5.5", temperature=None)`
-The Stage 1 entry point (`reckon.parser`). Takes scenario text (free text, structured steps, or Gherkin) and returns a validated `ExpectedTrace` via a single OpenAI call. `temperature` defaults to `None` (omitted from the request, since GPT-5-family models accept only their default); pass a value to pin it on a model that supports it. Pass `openai_client` to inject a test double. Raises `ValueError` on empty input or input containing more than one `Scenario:` block.
+### `parse_scenario(scenario_text, *, openai_client=None, model="claude-opus-5-5", temperature=None)`
+The Stage 1 entry point (`reckon.parser`). Takes scenario text (free text, structured steps, or Gherkin) and returns a validated `ExpectedTrace` via a single OpenAI-compatible gateway call. `temperature` defaults to `None` (omitted from the request, since some gateway models accept only their default); pass a value to pin it on a model that supports it. Pass `openai_client` to inject a test double. Raises `ValueError` on empty input or input containing more than one `Scenario:` block.
 
 ### `extract_observed_trace(openai_client, video_path, source_file, *, model=EXTRACTION_MODEL, max_frames_per_window=8, on_retry=None)`
 The Stage 2 entry point (`reckon.sampler`). Runs change detection → action windows → frame selection → one vision call per window → merge, and returns a single recording-absolute `ObservedTrace`. `on_retry` is a callback invoked on each transient-error backoff (used by the UI to show a "model busy" note). Returns an empty trace without making any model call when nothing on screen changed.
@@ -486,7 +487,7 @@ The comparison between expected and observed traces is deterministic code (Rapid
 `instructor` patches the OpenAI client so every model call — Stage 1 parsing, Stage 2 extraction, and the Stage 4 cross-check — returns a validated Pydantic model directly, with automatic retry on schema-invalid output. Now that all three stages speak to the same provider, they share one client factory (`make_openai_client`) and one structured-output mechanism.
 
 **Why the pipeline omits `temperature` by default**
-Reproducibility wants `temperature=0`, but the recommended GPT-5-family models accept only their default temperature and reject any explicit value. Stage 1 and the cross-check therefore omit the parameter rather than send `0`. It remains overridable (`parse_scenario(temperature=...)`) for models that support pinning it.
+Reproducibility wants `temperature=0`, but some gateway models accept only their default temperature and reject any explicit value. Stage 1 and the cross-check therefore omit the parameter rather than send `0`. It remains overridable (`parse_scenario(temperature=...)`) for models that support pinning it.
 
 **Why generic value placeholders aren't treated as input values**
 "Enter a password" describes a value; it doesn't give one. Capturing "a password" as `input_value` would produce a spurious `wrong_input_value` against the real (masked or different) on-screen value. Stage 1 captures only concrete literals as `input_value`, so the value check is skipped where there is no real value to compare.

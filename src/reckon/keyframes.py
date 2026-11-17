@@ -17,9 +17,12 @@ just to find *when* things happened. It needs no API key and no network.
 """
 
 from pathlib import Path
+from typing import NamedTuple
 
 import av
 from PIL import Image, ImageChops, ImageStat
+
+from reckon.stage2.selector import select_events
 
 _MS_PER_S = 1000
 
@@ -62,6 +65,13 @@ MIN_EVENT_GAP_MS = 700
 # a spinner, an animation — would otherwise produce an unbounded list. The strongest
 # changes survive the cap.
 MAX_CHANGE_EVENTS = 60
+
+
+class _ScoredChangeEvent(NamedTuple):
+    """Adapter so debounced (timestamp, score) pairs satisfy select_events."""
+
+    timestamp_ms: int
+    confidence: float
 
 
 def video_duration_ms(video_path: Path) -> int:
@@ -140,8 +150,14 @@ def _debounce(
         kept.append((timestamp_ms, score))
 
     if len(kept) > max_events:
-        strongest = sorted(kept, key=lambda event: event[1], reverse=True)[:max_events]
-        kept = sorted(strongest)
+        # Budgeted selection is policy-driven (default: legacy top-K by score).
+        # STAGE2_EVENT_SELECTION_POLICY is read inside select_events via config.
+        candidates = [
+            _ScoredChangeEvent(timestamp_ms=timestamp_ms, confidence=score)
+            for timestamp_ms, score in kept
+        ]
+        selected = select_events(candidates, max_events=max_events)
+        return [event.timestamp_ms for event in selected]
 
     return [timestamp_ms for timestamp_ms, _ in kept]
 

@@ -22,6 +22,7 @@ Only assertion verdicts modify the audit result, and only a confident "present" 
 import base64
 import logging
 import os
+import re
 from enum import Enum
 from pathlib import Path
 
@@ -54,6 +55,7 @@ from reckon.schema import (
     ExpectedStep,
     ExpectedTrace,
     Finding,
+    FindingSeverity,
     FindingType,
     ObservedAction,
     ObservedTrace,
@@ -65,10 +67,14 @@ from reckon.tolerance import (
     _introduces_negation,
     _normalise_assertion_text,
     actions_compatible,
+    assertion_roles_conflict_with_observation,
+    assertion_satisfied,
+    assertion_screen_compatible,
+    assertion_target_relevant,
     verdict_for,
 )
 
-CROSSCHECK_MODEL = os.environ.get("CROSSCHECK_MODEL", "gpt-5.5")
+CROSSCHECK_MODEL = os.environ.get("CROSSCHECK_MODEL", "claude-opus-5-5")
 
 # Observed actions the extractor scored below this are re-examined before publishing.
 LOW_CONFIDENCE_THRESHOLD = 0.7
@@ -81,9 +87,8 @@ OVERTURN_CONFIDENCE = 0.7
 FRAMES_PER_TARGET = 3
 WINDOW_PAD_MS = 2500
 
-# temperature is omitted (None → not sent): determinism is the goal, but the
-# recommended GPT-5-family cross-check model accepts only its default temperature and
-# rejects any explicit value.
+# temperature is omitted (None → not sent): determinism is the goal, but some gateway
+# models accept only their default temperature and reject any explicit value.
 _TEMPERATURE: float | None = None
 
 _OPPOSITE_STATE_PHRASES = (
@@ -277,8 +282,15 @@ def select_semantic_candidates(
     expected_trace: ExpectedTrace,
     observed_trace: ObservedTrace,
     audit_result: AuditResult,
+    *,
+    skip_pairs: set[tuple[int, int]] | None = None,
 ) -> list[_SemanticCandidate]:
-    """Select ambiguous wording only from pairs already chosen by the aligner."""
+    """Select ambiguous wording only from pairs already chosen by the aligner.
+
+    skip_pairs: optional Stage 3 assist-reviewed (expected_step, observed_action)
+    pairs that should not receive a second semantic LLM review in Stage 4.
+    When None/empty, behaviour matches the pre-assist Stage 4 path.
+    """
     step_by_index = {step.index: step for step in expected_trace.steps}
     action_by_index = {action.index: action for action in observed_trace.actions}
     protected_steps, protected_actions = _protected_contradiction_indices(
@@ -294,6 +306,7 @@ def select_semantic_candidates(
         pair = (finding.expected_step_index, finding.observed_action_index)
         findings_by_pair.setdefault(pair, set()).add(finding.type)
 
+    skip = skip_pairs or set()
     candidates: list[_SemanticCandidate] = []
     for step_verdict in audit_result.step_verdicts:
         action_index = step_verdict.matched_observed_index
@@ -302,6 +315,8 @@ def select_semantic_candidates(
         step = step_by_index.get(step_verdict.expected_step_index)
         action = action_by_index.get(action_index)
         if step is None or action is None:
+            continue
+        if (step.index, action.index) in skip:
             continue
         if step.index in protected_steps or action.index in protected_actions:
             continue
@@ -423,9 +438,93 @@ def _semantic_finding_present(
     )
 
 
+def _supporting_observation_for_visual(
+    step: ExpectedStep,
+    observed_trace: ObservedTrace,
+    *,
+    support_ts: int | None,
+    fallback_index: int | None,
+) -> tuple[int | None, int | None]:
+    """Prefer a proving observation near the supporting frame over a predecessor.
+
+    When Stage 4 clears an assertion from a later frame in the window, the step
+    evidence pointer must name that proof — not the DP-matched action that merely
+    preceded the visible state (e.g. join confirmation vs empty dashboard).
+    """
+    proving = [
+        action
+        for action in observed_trace.actions
+        if assertion_target_relevant(step.target, action)
+        and (
+            step.assertion is None
+            or assertion_satisfied(
+                step.assertion, action, expected_target=step.target
+            )
+        )
+    ]
+    if proving and support_ts is not None:
+        best = min(proving, key=lambda action: abs(action.timestamp_ms - support_ts))
+        return best.index, support_ts
+    if proving:
+        return proving[0].index, proving[0].timestamp_ms
+
+    # Stage 4 visual proof may clear an assertion whose text never landed in a
+    # structured observation. Still point evidence at a screen-compatible
+    # observation nearest the supporting frame — never a join-confirmation
+    # predecessor for a later dashboard frame.
+    compatible = [
+        action
+        for action in observed_trace.actions
+        if assertion_screen_compatible(step.target, action)
+    ]
+    if compatible and support_ts is not None:
+        relevant = [
+            action
+            for action in compatible
+            if assertion_target_relevant(step.target, action)
+        ]
+        pool = relevant or compatible
+        best = min(pool, key=lambda action: abs(action.timestamp_ms - support_ts))
+        return best.index, support_ts
+
+    if fallback_index is not None:
+        fallback = next(
+            (
+                action
+                for action in observed_trace.actions
+                if action.index == fallback_index
+            ),
+            None,
+        )
+        if fallback is not None and assertion_screen_compatible(step.target, fallback):
+            return (
+                fallback_index,
+                support_ts if support_ts is not None else fallback.timestamp_ms,
+            )
+        if support_ts is not None and compatible:
+            best = min(
+                compatible, key=lambda action: abs(action.timestamp_ms - support_ts)
+            )
+            return best.index, support_ts
+        if support_ts is not None:
+            return None, support_ts
+        if fallback is not None and not assertion_roles_conflict_with_observation(
+            step.target, fallback
+        ):
+            return fallback_index, fallback.timestamp_ms
+    elif support_ts is not None and compatible:
+        best = min(
+            compatible, key=lambda action: abs(action.timestamp_ms - support_ts)
+        )
+        return best.index, support_ts
+    return fallback_index, support_ts
+
+
 def _rebuild_audit_result(
     audit_result: AuditResult,
     findings: list[Finding],
+    *,
+    evidence_retargets: dict[int, tuple[int | None, int | None]] | None = None,
 ) -> AuditResult:
     finding_types_by_step: dict[int, list[FindingType]] = {}
     for finding in findings:
@@ -434,15 +533,21 @@ def _rebuild_audit_result(
                 finding.expected_step_index, []
             ).append(finding.type)
 
+    retargets = evidence_retargets or {}
     step_verdicts = []
     for step_verdict in audit_result.step_verdicts:
         finding_types = finding_types_by_step.get(
             step_verdict.expected_step_index, []
         )
-        step_verdicts.append(step_verdict.model_copy(update={
+        update: dict[str, object] = {
             "finding_types": finding_types,
             "passed": len(finding_types) == 0,
-        }))
+        }
+        if step_verdict.expected_step_index in retargets:
+            matched_index, evidence_ts = retargets[step_verdict.expected_step_index]
+            update["matched_observed_index"] = matched_index
+            update["evidence_timestamp_ms"] = evidence_ts
+        step_verdicts.append(step_verdict.model_copy(update=update))
 
     total = len(step_verdicts)
     passed = sum(1 for verdict in step_verdicts if verdict.passed)
@@ -510,6 +615,81 @@ def _apply_semantic_decisions(
     return _rebuild_audit_result(audit_result, new_findings)
 
 
+# Assist clears below this confidence still receive Stage 4 visual review even
+# when Stage 3 removed the assertion_not_observed finding.
+ASSIST_VISUAL_REVIEW_CONFIDENCE = 0.85
+
+
+def _preferred_assertion_anchor(
+    step: ExpectedStep | None,
+    observed_trace: ObservedTrace,
+    fallback_ms: int | None,
+    fallback_obs_index: int | None,
+    *,
+    expected_trace: ExpectedTrace | None = None,
+) -> tuple[int, int | None]:
+    """Choose a visual-check center that is not blindly the failed DP match.
+
+    Prefers an ObservedAction whose structured evidence satisfies the assertion.
+    When a deeplink re-entry exists after an alternate entry control (feed card),
+    prefer satisfying evidence at/after that re-entry. Falls back to the finding
+    timestamp when no better observation exists.
+    """
+    from reckon.workflow_reentry import reentry_lower_timestamp_ms
+
+    fallback = fallback_ms if fallback_ms is not None else 0
+    if step is None or not step.assertion:
+        return fallback, fallback_obs_index
+
+    reentry_floor: int | None = None
+    if expected_trace is not None:
+        reentry_floor = reentry_lower_timestamp_ms(
+            expected_trace, observed_trace, step_index=step.index
+        )
+
+    best: ObservedAction | None = None
+    best_score = -1.0
+    for action in observed_trace.actions:
+        if assertion_satisfied(
+            step.assertion, action, expected_target=step.target
+        ):
+            score = 2.0 + action.confidence
+        elif action.assertion_evidence is not None:
+            blob = " ".join(
+                part
+                for part in (
+                    action.assertion_evidence.visible_text,
+                    action.assertion_evidence.description,
+                    action.target,
+                    action.screen_description,
+                )
+                if part
+            ).lower()
+            required = {
+                token
+                for token in re.findall(r"[a-z0-9]+", step.assertion.lower())
+                if len(token) > 2
+            }
+            if not required:
+                continue
+            hits = sum(1 for token in required if token in blob)
+            score = hits / len(required)
+            if score < 0.5:
+                continue
+        else:
+            continue
+        if reentry_floor is not None and action.timestamp_ms >= reentry_floor:
+            score += 1.0
+        elif reentry_floor is not None and action.timestamp_ms < reentry_floor:
+            score -= 0.5
+        if score > best_score:
+            best_score = score
+            best = action
+    if best is None:
+        return fallback, fallback_obs_index
+    return best.timestamp_ms, best.index
+
+
 def select_crosscheck_targets(
     expected_trace: ExpectedTrace,
     observed_trace: ObservedTrace,
@@ -517,25 +697,62 @@ def select_crosscheck_targets(
     *,
     confidence_threshold: float = LOW_CONFIDENCE_THRESHOLD,
     window_pad_ms: int = WINDOW_PAD_MS,
+    skip_visual_steps: set[int] | None = None,
 ) -> list[CrossCheckTarget]:
     """Select the assertion findings and low-confidence actions to route to the second model.
 
     No model calls are made here — this is the deterministic routing decision.
+    Steps cleared by Stage 3 assist at LLM confidence < 0.85 are still queued for
+    independent visual review — ``skip_semantic_pairs`` never suppresses this path.
+
+    skip_visual_steps: expected steps already visually validated by Stage 2C at high
+    confidence; assertion visual rechecks for those steps are skipped to avoid
+    redundant correlated review. Low-confidence action checks are unaffected.
     """
     targets: list[CrossCheckTarget] = []
     step_by_index = {step.index: step for step in expected_trace.steps}
     protected_steps, protected_actions = _protected_contradiction_indices(
         expected_trace, observed_trace, audit_result
     )
+    targeted_steps: set[int] = set()
+    skip_visual = skip_visual_steps or set()
 
     for finding in audit_result.findings:
-        if finding.type != FindingType.assertion_not_observed:
+        step = (
+            step_by_index.get(finding.expected_step_index)
+            if finding.expected_step_index is not None
+            else None
+        )
+        is_assertion_missing = (
+            finding.type == FindingType.missing_action
+            and step is not None
+            and (
+                step.assertion is not None
+                or step.action in ASSERTION_ACTIONS
+            )
+        )
+        if (
+            finding.type != FindingType.assertion_not_observed
+            and not is_assertion_missing
+        ):
             continue
         if finding.expected_step_index in protected_steps:
             continue
-        step = step_by_index.get(finding.expected_step_index)
+        if (
+            finding.expected_step_index is not None
+            and finding.expected_step_index in skip_visual
+        ):
+            continue
         assertion = step.assertion if step else None
-        center = finding.evidence_timestamp_ms or 0
+        if assertion is None and step is not None:
+            assertion = step.target or step.raw_text
+        center, obs_index = _preferred_assertion_anchor(
+            step,
+            observed_trace,
+            finding.evidence_timestamp_ms,
+            finding.observed_action_index,
+            expected_trace=expected_trace,
+        )
         targets.append(CrossCheckTarget(
             kind=CrossCheckKind.assertion,
             question=(
@@ -546,8 +763,44 @@ def select_crosscheck_targets(
             window_end_ms=center + window_pad_ms,
             anchor_timestamp_ms=center,
             expected_step_index=finding.expected_step_index,
-            observed_action_index=finding.observed_action_index,
+            observed_action_index=obs_index,
         ))
+        if finding.expected_step_index is not None:
+            targeted_steps.add(finding.expected_step_index)
+
+    # Low-confidence assist clears: Stage 3 removed the finding, but Stage 4 visual
+    # review must still independently verify the claimed assertion evidence.
+    for verdict in audit_result.step_verdicts:
+        if not verdict.cleared_by_assist or not verdict.passed:
+            continue
+        if verdict.expected_step_index in targeted_steps:
+            continue
+        if verdict.expected_step_index in protected_steps:
+            continue
+        if verdict.expected_step_index in skip_visual:
+            continue
+        if (
+            verdict.assist_confidence is None
+            or verdict.assist_confidence >= ASSIST_VISUAL_REVIEW_CONFIDENCE
+        ):
+            continue
+        step = step_by_index.get(verdict.expected_step_index)
+        if step is None or step.assertion is None:
+            continue
+        center = verdict.evidence_timestamp_ms or 0
+        targets.append(CrossCheckTarget(
+            kind=CrossCheckKind.assertion,
+            question=(
+                f"Does text or a UI state matching {step.assertion!r} appear on screen "
+                "in these frames?"
+            ),
+            window_start_ms=max(0, center - window_pad_ms),
+            window_end_ms=center + window_pad_ms,
+            anchor_timestamp_ms=center,
+            expected_step_index=verdict.expected_step_index,
+            observed_action_index=verdict.matched_observed_index,
+        ))
+        targeted_steps.add(verdict.expected_step_index)
 
     already_targeted = {t.observed_action_index for t in targets}
     for action in observed_trace.actions:
@@ -625,6 +878,7 @@ def verify_target(
         openai_client, target.question, jpeg_frames, model, on_retry=on_retry
     )
     answer = check.answer
+    supporting_frame_timestamp_ms: int | None = None
     if check.answer == CrossCheckAnswer.present:
         support_index = check.supporting_frame_index
         support_is_valid = (
@@ -637,6 +891,8 @@ def verify_target(
                 frame_timestamps[support_index - 1]
                 >= target.anchor_timestamp_ms
             )
+        if support_is_valid and support_index is not None:
+            supporting_frame_timestamp_ms = frame_timestamps[support_index - 1]
         if not support_is_valid:
             answer = CrossCheckAnswer.unclear
 
@@ -648,6 +904,7 @@ def verify_target(
         frame_timestamps_ms=frame_timestamps,
         expected_step_index=target.expected_step_index,
         observed_action_index=target.observed_action_index,
+        supporting_frame_timestamp_ms=supporting_frame_timestamp_ms,
     )
 
 
@@ -661,7 +918,9 @@ def _apply_verdicts(
     """Refine the audit result using the cross-check verdicts.
 
     A qualifying "present" can resolve assertion_not_observed for its expected step and
-    wrong_target for its exact expected/observed pair. Other findings remain unchanged.
+    wrong_target for its exact expected/observed pair. A qualifying "absent" can
+    reinstate an assertion finding for steps cleared by low-confidence assist / Stage
+    2C so Stage 4 remains an independent check. Other findings remain unchanged.
     Low-confidence verdicts are recorded for the operator but do not change the result.
     """
     assertion_steps = {
@@ -681,6 +940,9 @@ def _apply_verdicts(
     )
     step_by_index = {step.index: step for step in expected_trace.steps}
     action_by_index = {action.index: action for action in observed_trace.actions}
+    verdict_by_step = {
+        item.expected_step_index: item for item in audit_result.step_verdicts
+    }
     qualifying_verdicts = [
         verdict
         for verdict in verdicts
@@ -702,7 +964,31 @@ def _apply_verdicts(
             in wrong_target_pairs
         )
     ]
-    if not qualifying_verdicts:
+    reinstate_steps: set[int] = set()
+    for verdict in verdicts:
+        if verdict.answer != CrossCheckAnswer.absent:
+            continue
+        if verdict.confidence < OVERTURN_CONFIDENCE:
+            continue
+        step_index = verdict.expected_step_index
+        if step_index is None or step_index in protected_steps:
+            continue
+        step = step_by_index.get(step_index)
+        step_verdict = verdict_by_step.get(step_index)
+        if step is None or step_verdict is None:
+            continue
+        if not step_verdict.cleared_by_assist or not step_verdict.passed:
+            continue
+        if (
+            step_verdict.assist_confidence is not None
+            and step_verdict.assist_confidence >= ASSIST_VISUAL_REVIEW_CONFIDENCE
+        ):
+            continue
+        if step.assertion is None and step.action not in ASSERTION_ACTIONS:
+            continue
+        reinstate_steps.add(step_index)
+
+    if not qualifying_verdicts and not reinstate_steps:
         return audit_result
 
     overturned_assertion_steps = {
@@ -712,6 +998,19 @@ def _apply_verdicts(
         (verdict.expected_step_index, verdict.observed_action_index)
         for verdict in qualifying_verdicts
     }
+    evidence_retargets: dict[int, tuple[int | None, int | None]] = {}
+    for verdict in qualifying_verdicts:
+        step_index = verdict.expected_step_index
+        if step_index is None or step_index not in overturned_assertion_steps:
+            continue
+        step = step_by_index[step_index]
+        evidence_retargets[step_index] = _supporting_observation_for_visual(
+            step,
+            observed_trace,
+            support_ts=verdict.supporting_frame_timestamp_ms,
+            fallback_index=verdict.observed_action_index,
+        )
+
     new_findings = [
         f for f in audit_result.findings
         if not (
@@ -726,8 +1025,49 @@ def _apply_verdicts(
             )
         )
     ]
+    existing_assertion = {
+        f.expected_step_index
+        for f in new_findings
+        if f.type == FindingType.assertion_not_observed
+    }
+    for step_index in sorted(reinstate_steps):
+        if step_index in existing_assertion:
+            continue
+        if step_index in overturned_assertion_steps:
+            continue
+        step = step_by_index[step_index]
+        step_verdict = verdict_by_step[step_index]
+        claim = step.assertion or step.target or f"step {step_index}"
+        new_findings.append(
+            Finding(
+                type=FindingType.assertion_not_observed,
+                severity=FindingSeverity.critical,
+                expected_step_index=step_index,
+                observed_action_index=step_verdict.matched_observed_index,
+                evidence_timestamp_ms=step_verdict.evidence_timestamp_ms,
+                description=(
+                    f"Stage 4 visual check did not confirm assertion {claim!r} "
+                    f"at the recovered evidence window."
+                ),
+            )
+        )
 
-    return _rebuild_audit_result(audit_result, new_findings)
+    refined = _rebuild_audit_result(
+        audit_result, new_findings, evidence_retargets=evidence_retargets
+    )
+    if not reinstate_steps:
+        return refined
+    updated_verdicts = []
+    for step_verdict in refined.step_verdicts:
+        if step_verdict.expected_step_index in reinstate_steps:
+            updated_verdicts.append(
+                step_verdict.model_copy(
+                    update={"cleared_by_assist": False, "assist_confidence": None}
+                )
+            )
+        else:
+            updated_verdicts.append(step_verdict)
+    return refined.model_copy(update={"step_verdicts": updated_verdicts})
 
 
 def run_cross_check(
@@ -742,12 +1082,21 @@ def run_cross_check(
     frames_per_target: int = FRAMES_PER_TARGET,
     window_pad_ms: int = WINDOW_PAD_MS,
     latency: LatencyMetrics | None = None,
+    skip_semantic_pairs: set[tuple[int, int]] | None = None,
+    skip_visual_steps: set[int] | None = None,
 ) -> CrossCheckReport:
     """Run the full cross-check pass and return verdicts plus a refined audit result.
 
     Ambiguous wording in existing deterministic pairs is checked first. The visual
     cross-check then receives that refined result. Pass openai_client to inject a test
     double; otherwise a default instructor-patched OpenAI client is created.
+
+    skip_semantic_pairs: pairs already reviewed by Stage 3 assist
+    (expected_step_index, observed_action_index). When omitted, Stage 4 behaviour is
+    unchanged. Visual frame checks are never skipped via this argument alone.
+
+    skip_visual_steps: expected steps already validated by Stage 2C frame evidence at
+    high confidence; assertion visual rechecks for those steps are skipped.
 
     When latency is provided (argument or active latency_scope), records
     semantic/visual wall times, candidate/target counts, and retry backoff totals.
@@ -757,7 +1106,10 @@ def run_cross_check(
     retry_callback = bind_retry_callback(latency, None)
 
     semantic_candidates = select_semantic_candidates(
-        expected_trace, observed_trace, audit_result
+        expected_trace,
+        observed_trace,
+        audit_result,
+        skip_pairs=skip_semantic_pairs,
     )
     if latency is not None:
         latency.stage4_semantic_candidate_count = len(semantic_candidates)
@@ -828,6 +1180,7 @@ def run_cross_check(
         semantic_result,
         confidence_threshold=confidence_threshold,
         window_pad_ms=window_pad_ms,
+        skip_visual_steps=skip_visual_steps,
     )
     if latency is not None:
         latency.stage4_visual_target_count = len(targets)

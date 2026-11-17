@@ -10,6 +10,14 @@ from reckon.latency import LatencyMetrics, WindowLatency
 from reckon.schema import (
     ActionType,
     AssertionEvidence,
+    AssistCandidateKind,
+    AssistMatchMethod,
+    AssistMetrics,
+    AssistProposalRecord,
+    AssistProposalStatus,
+    AssistReport,
+    AssistReviewedPair,
+    AssistedAlignResult,
     AuditResult,
     AuditVerdict,
     CrossCheckAnswer,
@@ -159,6 +167,61 @@ def test_write_recording_to_temp_from_file_like():
     assert destination.getvalue() == b"chunked-upload"
 
 
+def _assist_report(*, accepted: bool = True) -> AssistReport:
+    proposals = []
+    reviewed = []
+    if accepted:
+        proposals.append(
+            AssistProposalRecord(
+                kind=AssistCandidateKind.wrong_target,
+                status=AssistProposalStatus.accepted,
+                expected_step_index=1,
+                matched_observed_index=1,
+                finding_types=[FindingType.wrong_target],
+                model_answer="equivalent",
+                confidence=0.91,
+                rationale="same control",
+                matching_method=AssistMatchMethod.llm_assisted,
+            )
+        )
+        reviewed.append(
+            AssistReviewedPair(expected_step_index=1, observed_action_index=1)
+        )
+    else:
+        proposals.append(
+            AssistProposalRecord(
+                kind=AssistCandidateKind.wrong_target,
+                status=AssistProposalStatus.rejected,
+                expected_step_index=1,
+                matched_observed_index=1,
+                finding_types=[FindingType.wrong_target],
+                model_answer="different",
+                confidence=0.8,
+                rationale="distinct controls",
+                reason="model_different",
+                matching_method=AssistMatchMethod.rejected_proposal,
+            )
+        )
+    return AssistReport(
+        model="claude-opus-5-5",
+        proposals=proposals,
+        metrics=AssistMetrics(
+            expected_event_count=1,
+            observed_event_count=1,
+            deterministic_match_count=0,
+            candidate_count=1,
+            llm_request_count=1,
+            proposals_accepted=1 if accepted else 0,
+            proposals_rejected=0 if accepted else 1,
+            unresolved_count=0,
+            deterministic_ms=12.0,
+            llm_ms=34.0,
+            total_ms=50.0,
+        ),
+        reviewed_semantic_pairs=reviewed,
+    )
+
+
 def test_pipeline_uses_semantic_only_refined_result():
     expected = ExpectedTrace(
         scenario_title="test",
@@ -225,20 +288,27 @@ def test_pipeline_uses_semantic_only_refined_result():
         patch.object(app, "parse_scenario", return_value=expected),
         patch.object(app, "make_client", return_value=MagicMock()),
         patch.object(app, "extract_observed_trace", return_value=observed),
-        patch.object(app, "align", return_value=initial),
-        patch.object(app, "run_cross_check", return_value=report),
+        patch.object(app, "align", return_value=initial) as align_mock,
+        patch.object(app, "align_with_assist") as assist_mock,
+        patch.object(app, "run_cross_check", return_value=report) as cross_mock,
     ):
         result = app._run_pipeline(
             b"video",
             "recording.mp4",
             "Click Submit",
             run_crosscheck=True,
+            stage3_mode=app.STAGE3_MODE_DETERMINISTIC,
         )
 
     assert result is not None
     assert result[0] is refined
+    align_mock.assert_called_once_with(expected, observed)
+    assist_mock.assert_not_called()
+    cross_kwargs = cross_mock.call_args.kwargs
+    assert cross_kwargs.get("skip_semantic_pairs") is None
     assert streamlit.session_state["debug"]["crosscheck"] is not None
     assert streamlit.session_state["semantic_diagnostics"] == [diagnostic]
+    assert streamlit.session_state["stage3_assist"] is None
     completion_messages = [
         call.args[0]
         for call in streamlit.write.call_args_list
@@ -251,6 +321,344 @@ def test_pipeline_uses_semantic_only_refined_result():
     export = streamlit.session_state["export"]
     assert export["original_audit_result"]["verdict"] == "unfaithful"
     assert export["cross_check"]["refined_audit_result"]["verdict"] == "faithful"
+    assert export["stage3_mode"] == app.STAGE3_MODE_DETERMINISTIC
+    assert export["stage3_assist"] is None
+
+
+def test_pipeline_evidence_aware_mode_passes_evidence_aware_flag():
+    expected = ExpectedTrace(
+        scenario_title="test",
+        steps=[ExpectedStep(index=1, action=ActionType.click, target="Sign in")],
+    )
+    observed = ObservedTrace(
+        source_file="recording.mp4",
+        actions=[
+            ObservedAction(
+                index=1,
+                timestamp_ms=1500,
+                action=ActionType.click,
+                target="Login",
+                confidence=0.9,
+            ),
+        ],
+    )
+    deterministic = AuditResult(
+        verdict=AuditVerdict.unfaithful,
+        fidelity_score=0.0,
+        findings=[],
+        step_verdicts=[StepVerdict(expected_step_index=1, passed=False)],
+    )
+    assist = _assist_report(accepted=False)
+    bundle = AssistedAlignResult(
+        deterministic_result=deterministic,
+        result=deterministic,
+        assist=assist,
+    )
+
+    streamlit = MagicMock()
+    streamlit.session_state = {}
+    status = MagicMock()
+    status_context = MagicMock()
+    status_context.__enter__.return_value = status
+    status_context.__exit__.return_value = False
+    streamlit.status.return_value = status_context
+
+    with (
+        patch.object(app, "st", streamlit),
+        patch.object(app, "make_openai_client", return_value=MagicMock()),
+        patch.object(app, "parse_scenario", return_value=expected),
+        patch.object(app, "make_client", return_value=MagicMock()),
+        patch.object(app, "extract_observed_trace", return_value=observed),
+        patch.object(app, "align_with_assist", return_value=bundle) as assist_mock,
+        patch.object(app, "run_cross_check", return_value=CrossCheckReport(
+            verdicts=[], refined_result=deterministic
+        )),
+    ):
+        result = app._run_pipeline(
+            b"video",
+            "recording.mp4",
+            "Click Sign in",
+            run_crosscheck=True,
+            stage3_mode=app.STAGE3_MODE_EVIDENCE,
+        )
+
+    assert result is not None
+    assert assist_mock.call_args.kwargs.get("evidence_aware") is True
+    assert streamlit.session_state["export"]["stage3_mode"] == app.STAGE3_MODE_EVIDENCE
+
+
+def test_pipeline_assisted_mode_calls_align_with_assist_and_skips_accepted_pairs():
+    expected = ExpectedTrace(
+        scenario_title="test",
+        steps=[ExpectedStep(index=1, action=ActionType.click, target="Sign in")],
+    )
+    observed = ObservedTrace(
+        source_file="recording.mp4",
+        actions=[
+            ObservedAction(
+                index=1,
+                timestamp_ms=1500,
+                action=ActionType.click,
+                target="Login",
+                confidence=0.9,
+            ),
+        ],
+    )
+    deterministic = AuditResult(
+        verdict=AuditVerdict.unfaithful,
+        fidelity_score=0.0,
+        findings=[
+            Finding(
+                type=FindingType.wrong_target,
+                severity=FindingSeverity.critical,
+                expected_step_index=1,
+                observed_action_index=1,
+                evidence_timestamp_ms=1500,
+                description="Target mismatch",
+            )
+        ],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=False,
+                matched_observed_index=1,
+                evidence_timestamp_ms=1500,
+                finding_types=[FindingType.wrong_target],
+            ),
+        ],
+    )
+    assisted = AuditResult(
+        verdict=AuditVerdict.faithful,
+        fidelity_score=1.0,
+        findings=[],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=True,
+                matched_observed_index=1,
+                evidence_timestamp_ms=1500,
+            ),
+        ],
+    )
+    assist = _assist_report(accepted=True)
+    bundle = AssistedAlignResult(
+        deterministic_result=deterministic,
+        result=assisted,
+        assist=assist,
+    )
+    refined = assisted
+    report = CrossCheckReport(verdicts=[], refined_result=refined)
+
+    streamlit = MagicMock()
+    streamlit.session_state = {}
+    status = MagicMock()
+    status_context = MagicMock()
+    status_context.__enter__.return_value = status
+    status_context.__exit__.return_value = False
+    streamlit.status.return_value = status_context
+
+    with (
+        patch.object(app, "st", streamlit),
+        patch.object(app, "make_openai_client", return_value=MagicMock()),
+        patch.object(app, "parse_scenario", return_value=expected),
+        patch.object(app, "make_client", return_value=MagicMock()),
+        patch.object(app, "extract_observed_trace", return_value=observed),
+        patch.object(app, "align") as align_mock,
+        patch.object(app, "align_with_assist", return_value=bundle) as assist_mock,
+        patch.object(app, "run_cross_check", return_value=report) as cross_mock,
+    ):
+        result = app._run_pipeline(
+            b"video",
+            "recording.mp4",
+            "Click Sign in",
+            run_crosscheck=True,
+            stage3_mode=app.STAGE3_MODE_ASSISTED,
+        )
+
+    assert result is not None
+    assert result[0] is refined
+    align_mock.assert_not_called()
+    assist_mock.assert_called_once()
+    assist_kwargs = assist_mock.call_args.kwargs
+    assert assist_kwargs["model"] == app.ALIGN_ASSIST_MODEL
+    assert assist_kwargs.get("evidence_aware") is False
+    assert assist_mock.call_args.args[0] is expected
+    assert assist_mock.call_args.args[1] is observed
+    skip_pairs = cross_mock.call_args.kwargs.get("skip_semantic_pairs")
+    assert skip_pairs == {(1, 1)}
+    assert streamlit.session_state["stage3_assist"] is assist
+    assert streamlit.session_state["deterministic_stage3"] is deterministic
+    assert streamlit.session_state["assisted_stage3"] is assisted
+    export = streamlit.session_state["export"]
+    assert export["stage3_mode"] == app.STAGE3_MODE_ASSISTED
+    assert export["stage3_assist"]["assist"]["model"] == "claude-opus-5-5"
+    assert export["stage3_assist"]["deterministic_audit_result"]["verdict"] == "unfaithful"
+    assert export["stage3_assist"]["assisted_audit_result"]["verdict"] == "faithful"
+    assert export["original_audit_result"]["verdict"] == "faithful"
+
+
+def test_pipeline_assisted_rejected_pairs_are_not_skipped_in_stage4():
+    expected = ExpectedTrace(
+        scenario_title="test",
+        steps=[ExpectedStep(index=1, action=ActionType.click, target="Sign in")],
+    )
+    observed = ObservedTrace(
+        source_file="recording.mp4",
+        actions=[
+            ObservedAction(
+                index=1,
+                timestamp_ms=1500,
+                action=ActionType.click,
+                target="Cancel",
+                confidence=0.9,
+            ),
+        ],
+    )
+    deterministic = AuditResult(
+        verdict=AuditVerdict.unfaithful,
+        fidelity_score=0.0,
+        findings=[],
+        step_verdicts=[StepVerdict(expected_step_index=1, passed=False)],
+    )
+    assist = _assist_report(accepted=False)
+    bundle = AssistedAlignResult(
+        deterministic_result=deterministic,
+        result=deterministic,
+        assist=assist,
+    )
+    report = CrossCheckReport(verdicts=[], refined_result=deterministic)
+
+    streamlit = MagicMock()
+    streamlit.session_state = {}
+    status = MagicMock()
+    status_context = MagicMock()
+    status_context.__enter__.return_value = status
+    status_context.__exit__.return_value = False
+    streamlit.status.return_value = status_context
+
+    with (
+        patch.object(app, "st", streamlit),
+        patch.object(app, "make_openai_client", return_value=MagicMock()),
+        patch.object(app, "parse_scenario", return_value=expected),
+        patch.object(app, "make_client", return_value=MagicMock()),
+        patch.object(app, "extract_observed_trace", return_value=observed),
+        patch.object(app, "align_with_assist", return_value=bundle),
+        patch.object(app, "run_cross_check", return_value=report) as cross_mock,
+    ):
+        result = app._run_pipeline(
+            b"video",
+            "recording.mp4",
+            "Click Sign in",
+            run_crosscheck=True,
+            stage3_mode=app.STAGE3_MODE_ASSISTED,
+        )
+
+    assert result is not None
+    assert cross_mock.call_args.kwargs.get("skip_semantic_pairs") == set()
+
+
+def test_reviewed_skip_pairs_only_includes_accepted():
+    assist = _assist_report(accepted=True)
+    assert app._reviewed_skip_pairs(assist) == {(1, 1)}
+    rejected = _assist_report(accepted=False)
+    assert app._reviewed_skip_pairs(rejected) == set()
+
+
+def test_render_stage3_assist_panel_shows_comparison_and_metrics():
+    assist = _assist_report(accepted=True)
+    assist.proposals.append(
+        AssistProposalRecord(
+            kind=AssistCandidateKind.delayed_assertion,
+            status=AssistProposalStatus.accepted,
+            expected_step_index=2,
+            matched_observed_index=2,
+            supporting_observed_index=3,
+            finding_types=[FindingType.assertion_not_observed],
+            matching_method=AssistMatchMethod.deterministic,
+        )
+    )
+    assist.proposals.append(
+        AssistProposalRecord(
+            kind=AssistCandidateKind.wrong_target,
+            status=AssistProposalStatus.rejected,
+            expected_step_index=3,
+            matched_observed_index=4,
+            finding_types=[FindingType.wrong_target],
+            model_answer="unresolved",
+            reason="model_unresolved",
+            matching_method=AssistMatchMethod.unresolved,
+        )
+    )
+    deterministic = AuditResult(
+        verdict=AuditVerdict.unfaithful,
+        fidelity_score=0.0,
+        findings=[
+            Finding(
+                type=FindingType.wrong_target,
+                severity=FindingSeverity.critical,
+                expected_step_index=1,
+                observed_action_index=1,
+                evidence_timestamp_ms=1500,
+                description="mismatch",
+            )
+        ],
+        step_verdicts=[],
+    )
+    assisted = AuditResult(
+        verdict=AuditVerdict.faithful,
+        fidelity_score=1.0,
+        findings=[],
+        step_verdicts=[],
+    )
+    observed = ObservedTrace(
+        source_file="recording.mp4",
+        actions=[
+            ObservedAction(
+                index=1,
+                timestamp_ms=1500,
+                action=ActionType.click,
+                target="Login",
+                confidence=1.0,
+            ),
+            ObservedAction(
+                index=3,
+                timestamp_ms=3200,
+                action=ActionType.assert_visible,
+                target="Done",
+                confidence=1.0,
+            ),
+        ],
+    )
+    streamlit = MagicMock()
+    streamlit.columns.side_effect = lambda n, **_k: [MagicMock() for _ in range(n)]
+
+    with patch.object(app, "st", streamlit):
+        app._render_stage3_assist_panel(
+            assist=assist,
+            deterministic=deterministic,
+            assisted=assisted,
+            token_usage={
+                "request_count": 1,
+                "usage_available_count": 1,
+                "prompt_tokens_sum": 10,
+                "completion_tokens_sum": 4,
+                "total_tokens_sum": 14,
+                "requests": [],
+            },
+            observed=observed,
+        )
+
+    streamlit.subheader.assert_called_once_with("Stage 3 — LLM Assist (experimental)")
+    markdowns = [call.args[0] for call in streamlit.markdown.call_args_list]
+    assert "**Resolved by deterministic delayed evidence**" in markdowns
+    assert "**Resolved by Claude (validated)**" in markdowns
+    assert "**Rejected or unresolved proposals**" in markdowns
+    assert "**Deterministic Stage 3**" in markdowns
+    assert "**Assisted Stage 3 (pre–Stage 4)**" in markdowns
+    writes = [str(call.args[0]) for call in streamlit.write.call_args_list if call.args]
+    assert any("O3 @ 3.200s" in text for text in writes)
+    captions = [str(call.args[0]) for call in streamlit.caption.call_args_list if call.args]
+    assert any("Token usage" in text for text in captions)
 
 
 def test_stage4_completion_message_includes_score_when_no_checks_run():

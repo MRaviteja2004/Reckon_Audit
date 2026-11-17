@@ -11,10 +11,13 @@ from reckon.parser import (
     _LLMStep,
     _LLMTrace,
     _build_expected_trace,
+    _expand_onboarding_other,
     _extract_gherkin_scenario_title,
     _extract_gherkin_steps,
     _is_lossless_gherkin,
     _looks_like_gherkin,
+    _onboarding_milestones_from_text,
+    _reclassify_select_versus_state,
     make_openai_client,
     parse_scenario,
 )
@@ -76,6 +79,27 @@ def test_free_text_system_requires_raw_text():
     assert "raw_text" in _FREE_TEXT_SYSTEM
 
 
+def test_free_text_system_documents_login_decomposition():
+    lowered = _FREE_TEXT_SYSTEM.lower()
+    assert "login decomposition" in lowered
+    assert "do not invent password" in lowered
+    assert "next/submit" in lowered
+
+
+def test_free_text_system_documents_onboarding_decomposition():
+    lowered = _FREE_TEXT_SYSTEM.lower()
+    assert "onboarding decomposition" in lowered
+    assert "milestone" in lowered
+    assert "hub" in lowered
+
+
+def test_free_text_system_documents_select_versus_state():
+    lowered = _FREE_TEXT_SYSTEM.lower()
+    assert "select action versus selected state" in lowered
+    assert "is selected" in lowered
+    assert "assert_state" in lowered
+
+
 # ---------------------------------------------------------------------------
 # Prompt contract — Gherkin
 # ---------------------------------------------------------------------------
@@ -113,6 +137,12 @@ def test_gherkin_system_skips_generic_value_placeholders():
 
 def test_gherkin_system_requires_one_output_step_per_input_line():
     assert "one" in _GHERKIN_SYSTEM.lower() and "line" in _GHERKIN_SYSTEM.lower()
+
+
+def test_gherkin_system_documents_select_versus_state():
+    lowered = _GHERKIN_SYSTEM.lower()
+    assert "is selected" in lowered
+    assert "assert_state" in lowered
 
 
 def test_gherkin_system_lists_valid_action_types():
@@ -307,6 +337,163 @@ def test_extract_gherkin_steps_preserves_order():
 # ---------------------------------------------------------------------------
 # _build_expected_trace
 # ---------------------------------------------------------------------------
+
+def test_onboarding_milestones_extracted_from_austin_style_text():
+    text = (
+        "After the Onboarding process like- Security Number, Start Earn, "
+        "vehicle user should land on Hub screen."
+    )
+    assert _onboarding_milestones_from_text(text) == [
+        "Security Number",
+        "Start Earn",
+        "vehicle",
+    ]
+
+
+def test_expand_onboarding_other_splits_milestones_and_hub_when_needed():
+    step = _LLMStep(
+        action=ActionType.other,
+        target="Onboarding process (Security Number, Start Earn, vehicle)",
+        raw_text=(
+            "2. After the Onboarding process like- Security Number, Start Earn, "
+            "vehicle user should land on Hub screen."
+        ),
+    )
+    expanded = _expand_onboarding_other(step, next_step=None)
+    assert [item.action for item in expanded] == [
+        ActionType.other,
+        ActionType.other,
+        ActionType.other,
+        ActionType.assert_visible,
+    ]
+    assert [item.target for item in expanded] == [
+        "Security Number",
+        "Start Earn",
+        "vehicle",
+        "Hub screen",
+    ]
+
+
+def test_expand_onboarding_other_skips_hub_when_next_step_already_hub():
+    step = _LLMStep(
+        action=ActionType.other,
+        target="Onboarding process",
+        raw_text=(
+            "After the Onboarding process like- Security Number, Start Earn, "
+            "vehicle user should land on Hub screen."
+        ),
+    )
+    next_step = _LLMStep(
+        action=ActionType.assert_visible,
+        target="Hub screen",
+        assertion="user should land on Hub screen.",
+        raw_text=step.raw_text,
+    )
+    expanded = _expand_onboarding_other(step, next_step=next_step)
+    assert [item.target for item in expanded] == [
+        "Security Number",
+        "Start Earn",
+        "vehicle",
+    ]
+
+
+def test_expand_onboarding_other_does_not_reexpand_single_milestone_step():
+    step = _LLMStep(
+        action=ActionType.other,
+        target="Security Number",
+        raw_text=(
+            "After the Onboarding process like- Security Number, Start Earn, "
+            "vehicle user should land on Hub screen."
+        ),
+    )
+    assert _expand_onboarding_other(step, next_step=None) == [step]
+
+
+def test_reclassify_select_versus_state_for_preselected_claim():
+    step = _LLMStep(
+        action=ActionType.select,
+        target="Rides and Delivery with car",
+        input_value="Rides and Delivery with car",
+        raw_text='Verify that "Rides and Delivery with car" is selected.',
+    )
+    refined = _reclassify_select_versus_state(step)
+    assert refined.action == ActionType.assert_state
+    assert refined.input_value is None
+    assert refined.assertion is not None
+
+
+def test_reclassify_keeps_imperative_select():
+    step = _LLMStep(
+        action=ActionType.select,
+        target="Rides and Delivery with car",
+        input_value="Rides and Delivery with car",
+        raw_text='Choose "Rides and Delivery with car" and tap Continue.',
+    )
+    assert _reclassify_select_versus_state(step).action == ActionType.select
+
+
+def test_build_expected_trace_expands_austin_style_onboarding_other():
+    llm_trace = _LLMTrace(
+        scenario_title="Austin onboarding",
+        steps=[
+            _LLMStep(
+                action=ActionType.other,
+                target="Driver app login",
+                raw_text="1. Login to Driver app with valid credential.",
+            ),
+            _LLMStep(
+                action=ActionType.other,
+                target="Onboarding process (Security Number, Start Earn, vehicle)",
+                raw_text=(
+                    "2. After the Onboarding process like- Security Number, "
+                    "Start Earn, vehicle user should land on Hub screen."
+                ),
+            ),
+            _LLMStep(
+                action=ActionType.assert_visible,
+                target="Hub screen",
+                assertion="user should land on Hub screen.",
+                raw_text=(
+                    "2. After the Onboarding process like- Security Number, "
+                    "Start Earn, vehicle user should land on Hub screen."
+                ),
+            ),
+        ],
+    )
+    trace = _build_expected_trace(llm_trace)
+    assert [step.action for step in trace.steps] == [
+        ActionType.other,
+        ActionType.other,
+        ActionType.other,
+        ActionType.other,
+        ActionType.assert_visible,
+    ]
+    assert [step.target for step in trace.steps] == [
+        "Driver app login",
+        "Security Number",
+        "Start Earn",
+        "vehicle",
+        "Hub screen",
+    ]
+    assert [step.index for step in trace.steps] == [1, 2, 3, 4, 5]
+
+
+def test_build_expected_trace_does_not_invent_login_substeps_from_coarse_other():
+    llm_trace = _LLMTrace(
+        scenario_title="Coarse login",
+        steps=[
+            _LLMStep(
+                action=ActionType.other,
+                target="Driver app login",
+                raw_text="1. Login to Driver app with valid credential.",
+            ),
+        ],
+    )
+    trace = _build_expected_trace(llm_trace)
+    assert len(trace.steps) == 1
+    assert trace.steps[0].action == ActionType.other
+    assert trace.steps[0].target == "Driver app login"
+
 
 def test_build_expected_trace_reindexes_sequentially():
     llm_trace = _make_llm_trace()
@@ -820,7 +1007,7 @@ def test_parse_scenario_single_scenario_outline_is_allowed():
 
 
 # ---------------------------------------------------------------------------
-# Temperature: omitted by default (GPT-5-family models reject explicit values),
+# Temperature: omitted by default (some gateway models reject explicit values),
 # still overridable for models that support it.
 # ---------------------------------------------------------------------------
 

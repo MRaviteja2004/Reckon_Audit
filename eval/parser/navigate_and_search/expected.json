@@ -8,7 +8,7 @@
       "input_value": null,
       "assertion": null,
       "preconditions": null,
-      "raw_text": "Navigate to the search page, enter \"Reckon\" in the search field, and click the Search button."
+      "raw_text": "Navigate to the search page"
     },
     {
       "index": 2,
@@ -17,7 +17,7 @@
       "input_value": "Reckon",
       "assertion": null,
       "preconditions": null,
-      "raw_text": "Navigate to the search page, enter \"Reckon\" in the search field, and click the Search button."
+      "raw_text": "enter \"Reckon\" in the search field"
     },
     {
       "index": 3,
@@ -26,7 +26,7 @@
       "input_value": null,
       "assertion": null,
       "preconditions": null,
-      "raw_text": "Navigate to the search page, enter \"Reckon\" in the search field, and click the Search button."
+      "raw_text": "click the Search button"
     }
   ]
 }

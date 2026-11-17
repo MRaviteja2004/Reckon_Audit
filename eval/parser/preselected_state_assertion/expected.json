@@ -1,0 +1,14 @@
+{
+  "scenario_title": "Preselected earn mode state",
+  "steps": [
+    {
+      "index": 1,
+      "action": "assert_state",
+      "target": "Rides and Delivery with car",
+      "input_value": null,
+      "assertion": "Rides and Delivery with car",
+      "preconditions": null,
+      "raw_text": "Verify that \"Rides and Delivery with car\" is selected."
+    }
+  ]
+}

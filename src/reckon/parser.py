@@ -24,14 +24,21 @@ import instructor
 from pydantic import BaseModel, Field
 
 from reckon.gateway import make_gateway_client
+from reckon.macros.expand import apply_domain_macros
+from reckon.macros.textutils import (
+    _HUB_LANDING_RE,
+    onboarding_milestones_from_text as _onboarding_milestones_from_text,
+    strip_step_number_prefix as _strip_step_number_prefix,
+)
+from reckon.equivalence.citations import bind_expected_intent
 from reckon.schema import ActionType, ExpectedStep, ExpectedTrace
 
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.5")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "claude-opus-5-5")
 
 # temperature is omitted by default (None → not sent). Reproducibility (same input →
-# same verdict) is a stated POC goal and is best served by temperature=0, but the
-# recommended GPT-5-family models only accept their default temperature and reject any
-# explicit value. Callers targeting a model that supports it can pass temperature=0.0.
+# same verdict) is a stated POC goal and is best served by temperature=0, but some
+# gateway models only accept their default temperature and reject any explicit value.
+# Callers targeting a model that supports it can pass temperature=0.0.
 DEFAULT_TEMPERATURE: float | None = None
 
 # Matches a Given/When/Then/And/But step line and captures the step text.
@@ -112,6 +119,40 @@ Keep it in that action's raw_text; do not emit a separate `other` step for the w
 quoted text is displayed.
 - Use assert_visible when the scenario only verifies that a UI element is visible \
 without checking specific text.
+
+Login decomposition:
+- When the scenario only says to log in (e.g. "Login to the driver app with valid \
+credentials") without naming sub-actions, emit a single `other` (or one stated \
+landing assertion). Do NOT invent password values, field clicks, or Next/Submit \
+taps that the text does not mention.
+- When the scenario explicitly describes login sub-steps, emit them separately: \
+credential entry (`type_text`, with input_value only if a concrete value is given), \
+password/login control actions (`click` / `type_text` as written), Next/Submit \
+(`click`), and a logged-in or landing-state assertion only when the scenario \
+states that outcome.
+
+Onboarding decomposition:
+- When the scenario lists required onboarding milestones (for example Security \
+Number / SSN, Start Earn, vehicle, then Hub), emit one step per explicitly named \
+milestone rather than one coarse `other` for the whole process.
+- Include only milestones the scenario text supports. Do not assume every \
+onboarding flow needs every milestone.
+- A stated Hub / home landing is `assert_visible` / `assert_state` on that screen, \
+not part of a bundled `other`.
+
+Structured intent, when you can cite it from the step line:
+- operation is one of activate, enter, choose, traverse, dismiss, assert.
+- operation_text, kind_text, name, product, instance, and value must be exact \
+substrings of that step line. Leave the whole intent empty when you cannot.
+
+Select action versus selected state:
+- Imperative wording ("Select …", "Choose …", "Tap … to select …") → `select` \
+(or `click` when the scenario says tap/click), with input_value only when a \
+concrete option value is given.
+- State wording ("… is selected", "… are selected", "already selected") → \
+`assert_state` (or `assert_visible` when only visibility of the selection is \
+checked). Do not emit `select` for a state claim, and do not treat a preselected \
+state as proof that the user performed a selection.
 """
 
 _GHERKIN_SYSTEM = f"""\
@@ -140,7 +181,26 @@ Rules:
 text is displayed.
 - Use assert_visible when the step only verifies that a UI element is visible \
 without checking specific text.
+- Imperative "Select/Choose …" on one line → `select`. State wording \
+("… is selected" / "already selected") on one line → `assert_state`. Do not \
+emit `select` for a state-only claim.
+- Optional intent: operation, operation_text, kind, kind_text, name, product, \
+instance, and value. Every text must be an exact substring of the step line. \
+Leave intent empty when you cannot cite it.
 """
+
+
+class _LLMIntent(BaseModel):
+    """Optional slot strings. Python binds them to the original scenario or drops them."""
+
+    operation: str | None = None
+    operation_text: str | None = None
+    kind: str | None = None
+    kind_text: str | None = None
+    name: str | None = None
+    product: str | None = None
+    instance: str | None = None
+    value: str | None = None
 
 
 class _LLMStep(BaseModel):
@@ -164,6 +224,7 @@ class _LLMStep(BaseModel):
         None,
         description="Original scenario sentence or Gherkin line",
     )
+    intent: _LLMIntent | None = None
 
 
 class _LLMTrace(BaseModel):
@@ -253,20 +314,143 @@ def _extract_gherkin_steps(text: str) -> list[str]:
     ]
 
 
-def _build_expected_trace(llm_trace: _LLMTrace) -> ExpectedTrace:
+# Imperative selection verbs — presence means the step is an interaction.
+_SELECT_IMPERATIVE_RE = re.compile(
+    r"\b(?:select|choose|pick|tap|click)\b",
+    re.IGNORECASE,
+)
+# State claims that an option is already / remains selected.
+_SELECTED_STATE_RE = re.compile(
+    r"\b(?:is|are|remains?|stays?)\s+selected\b|\balready\s+selected\b",
+    re.IGNORECASE,
+)
+
+
+def _reclassify_select_versus_state(step: _LLMStep) -> _LLMStep:
+    """Map state-only 'is selected' claims away from interactive ``select``."""
+    text = _strip_step_number_prefix(step.raw_text or "")
+    if not text:
+        return step
+    if step.action != ActionType.select:
+        return step
+    if not _SELECTED_STATE_RE.search(text):
+        return step
+    if _SELECT_IMPERATIVE_RE.search(text):
+        # "Select X so that Y is selected" still describes an interaction.
+        return step
+    assertion = step.assertion or text
+    return step.model_copy(
+        update={
+            "action": ActionType.assert_state,
+            "input_value": None,
+            "assertion": assertion,
+        }
+    )
+
+
+def _expand_onboarding_other(
+    step: _LLMStep,
+    *,
+    next_step: _LLMStep | None,
+) -> list[_LLMStep]:
+    """Split a coarse onboarding ``other`` into explicitly listed milestones."""
+    if step.action != ActionType.other:
+        return [step]
+    text = step.raw_text or ""
+    milestones = _onboarding_milestones_from_text(text)
+    if milestones is None:
+        return [step]
+
+    # If the model already emitted one milestone per step (same raw_text on each),
+    # do not expand again — that would triplicate Security Number / Start Earn / …
+    target_key = (step.target or "").strip().lower()
+    if target_key and any(
+        target_key == milestone.strip().lower() for milestone in milestones
+    ):
+        return [step]
+
+    expanded = [
+        _LLMStep(
+            action=ActionType.other,
+            target=milestone,
+            input_value=None,
+            assertion=None,
+            preconditions=step.preconditions,
+            raw_text=step.raw_text,
+        )
+        for milestone in milestones
+    ]
+
+    if _HUB_LANDING_RE.search(text):
+        next_targets_hub = bool(
+            next_step is not None
+            and next_step.target
+            and re.search(r"\bhub\b", next_step.target, re.IGNORECASE)
+        )
+        if not next_targets_hub:
+            expanded.append(
+                _LLMStep(
+                    action=ActionType.assert_visible,
+                    target="Hub screen",
+                    input_value=None,
+                    assertion="user should land on Hub screen.",
+                    preconditions=step.preconditions,
+                    raw_text=step.raw_text,
+                )
+            )
+    return expanded
+
+
+def _refine_llm_steps(
+    steps: list[_LLMStep],
+    *,
+    expand_onboarding: bool = True,
+) -> list[_LLMStep]:
+    """Apply deterministic Stage 1 refinements without inventing scenario content.
+
+    When ``expand_onboarding`` is False (macros path), listed onboarding
+    milestones are left for ``apply_domain_macros`` so expansion happens once.
+    Select-versus-state reclassification always runs.
+    """
+    refined: list[_LLMStep] = []
+    for index, step in enumerate(steps):
+        reclassified = _reclassify_select_versus_state(step)
+        if not expand_onboarding:
+            refined.append(reclassified)
+            continue
+        next_step = steps[index + 1] if index + 1 < len(steps) else None
+        refined.extend(
+            _expand_onboarding_other(reclassified, next_step=next_step)
+        )
+    return refined
+
+
+def _build_expected_trace(
+    llm_trace: _LLMTrace,
+    *,
+    scenario_text: str = "",
+    enable_macros: bool = False,
+) -> ExpectedTrace:
     """Convert the raw LLM trace into a validated ExpectedTrace.
 
     Reindexes steps sequentially starting at 1 so the schema constraint is
     satisfied regardless of what the model emitted.
+
+    Default path (``enable_macros=False``): legacy refine including hard-coded
+    onboarding milestone expansion.
+
+    Macros path (``enable_macros=True``): refine keeps select-versus-state and
+    dismiss→click only; onboarding milestone expansion is performed exactly once
+    by the Domain Macro registry.
     """
+    refined = _refine_llm_steps(
+        llm_trace.steps,
+        expand_onboarding=not enable_macros,
+    )
     steps = []
-    for i, step in enumerate(llm_trace.steps, start=1):
+    for i, step in enumerate(refined, start=1):
         action = step.action
-        classification_text = re.sub(
-            r"^\s*(?:(?:\d+[.)]|[-*•])\s+)?",
-            "",
-            step.raw_text or "",
-        )
+        classification_text = _strip_step_number_prefix(step.raw_text or "")
         if (
             action == ActionType.other
             and step.assertion is None
@@ -282,8 +466,88 @@ def _build_expected_trace(llm_trace: _LLMTrace) -> ExpectedTrace:
             assertion=step.assertion,
             preconditions=step.preconditions,
             raw_text=step.raw_text,
+            action_intent=_intent_for_step(scenario_text, step, i, len(refined)),
         ))
-    return ExpectedTrace(scenario_title=llm_trace.scenario_title, steps=steps)
+
+    macros_applied = []
+    if enable_macros:
+        steps, macros_applied = apply_domain_macros(steps, scenario_text=scenario_text)
+
+    return ExpectedTrace(
+        scenario_title=llm_trace.scenario_title,
+        steps=steps,
+        source_text=scenario_text or None,
+        macros_applied=macros_applied,
+    )
+
+
+def _body_spans(text: str, pattern: re.Pattern[str]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        match = pattern.match(line)
+        if match and match.lastindex:
+            spans.append((offset + match.start(1), offset + match.end(1)))
+        offset += len(line)
+    return spans
+
+
+def _sentence_span(
+    scenario_text: str,
+    step: _LLMStep,
+    index: int,
+    count: int,
+) -> tuple[int, int] | None:
+    """Locate this step in the original input. Return None when the bound is unreliable."""
+    if not scenario_text:
+        return None
+    gherkin = _body_spans(scenario_text, _GHERKIN_STEP_RE)
+    numbered = _body_spans(
+        scenario_text,
+        re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+(.+)$"),
+    )
+    if len(gherkin) == count:
+        return gherkin[index - 1]
+    if len(numbered) == count:
+        return numbered[index - 1]
+    raw = step.raw_text or ""
+    if raw and scenario_text.count(raw) == 1:
+        start = scenario_text.find(raw)
+        return start, start + len(raw)
+    return None
+
+
+def _intent_for_step(
+    scenario_text: str,
+    step: _LLMStep,
+    index: int,
+    count: int,
+):
+    intent = step.intent
+    if (
+        intent is None
+        or not intent.operation
+        or not intent.operation_text
+        or not intent.kind
+        or not intent.kind_text
+    ):
+        return None
+    span = _sentence_span(scenario_text, step, index, count)
+    if span is None:
+        return None
+    return bind_expected_intent(
+        scenario_text,
+        sentence_start=span[0],
+        sentence_end=span[1],
+        operation=intent.operation,
+        operation_text=intent.operation_text,
+        kind=intent.kind,
+        kind_text=intent.kind_text,
+        name=intent.name,
+        product=intent.product,
+        instance=intent.instance,
+        value=intent.value,
+    )
 
 
 def _classify_steps(
@@ -314,6 +578,7 @@ def parse_scenario(
     openai_client: instructor.Instructor | None = None,
     model: str = OPENAI_MODEL,
     temperature: float | None = DEFAULT_TEMPERATURE,
+    enable_macros: bool = False,
 ) -> ExpectedTrace:
     """Parse a scenario text into a validated ExpectedTrace.
 
@@ -325,6 +590,9 @@ def parse_scenario(
 
     A single LLM call is made and its output is validated against the Pydantic
     schema before being returned. Pass openai_client to inject a test double.
+
+    Domain Macros are disabled by default (``enable_macros=False``) so existing
+    Stage 1 callers keep the prior ExpectedTrace shape and step content.
 
     Raises ValueError on empty input or on input containing more than one
     Scenario block (the ExpectedTrace schema models a single scenario).
@@ -341,8 +609,20 @@ def parse_scenario(
         openai_client = make_openai_client()
 
     if _looks_like_gherkin(scenario_text) and _is_lossless_gherkin(scenario_text):
-        return _parse_gherkin(scenario_text, openai_client, model, temperature)
-    return _parse_free_text(scenario_text, openai_client, model, temperature)
+        return _parse_gherkin(
+            scenario_text,
+            openai_client,
+            model,
+            temperature,
+            enable_macros=enable_macros,
+        )
+    return _parse_free_text(
+        scenario_text,
+        openai_client,
+        model,
+        temperature,
+        enable_macros=enable_macros,
+    )
 
 
 def _parse_free_text(
@@ -350,6 +630,8 @@ def _parse_free_text(
     client: instructor.Instructor,
     model: str,
     temperature: float | None,
+    *,
+    enable_macros: bool = False,
 ) -> ExpectedTrace:
     llm_trace = _classify_steps(
         client,
@@ -371,7 +653,11 @@ def _parse_free_text(
         ):
             step.raw_text = raw_text
 
-    return _build_expected_trace(llm_trace)
+    return _build_expected_trace(
+        llm_trace,
+        scenario_text=scenario_text,
+        enable_macros=enable_macros,
+    )
 
 
 def _parse_gherkin(
@@ -379,6 +665,8 @@ def _parse_gherkin(
     client: instructor.Instructor,
     model: str,
     temperature: float | None,
+    *,
+    enable_macros: bool = False,
 ) -> ExpectedTrace:
     """Parse clean Gherkin: extract step lines deterministically, classify with LLM.
 
@@ -393,4 +681,8 @@ def _parse_gherkin(
     llm_trace = _classify_steps(client, model, temperature, _GHERKIN_SYSTEM, user_content)
     # Prefer the deterministically parsed title over whatever the model emitted.
     llm_trace.scenario_title = title
-    return _build_expected_trace(llm_trace)
+    return _build_expected_trace(
+        llm_trace,
+        scenario_text=scenario_text,
+        enable_macros=enable_macros,
+    )

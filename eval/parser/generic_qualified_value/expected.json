@@ -4,7 +4,7 @@
     {
       "index": 1,
       "action": "type_text",
-      "target": "username",
+      "target": "username field",
       "input_value": null,
       "assertion": null,
       "preconditions": null,
