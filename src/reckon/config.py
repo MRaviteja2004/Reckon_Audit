@@ -29,3 +29,10 @@ STAGE2_ADAPTIVE_MAX_FRAMES_PER_WINDOW = _env_int(
 STAGE2_ADAPTIVE_INTERACTION_WINDOW_MS = _env_int(
     "STAGE2_ADAPTIVE_INTERACTION_WINDOW_MS", 45_000
 )
+
+# Opt-in frame sampling of long quiet stretches that change detection leaves unsampled.
+# "legacy" keeps change-detected windows only; "gap_coverage" adds one midpoint frame
+# per gap longer than STAGE2_GAP_MIN_MS, up to STAGE2_GAP_MAX_EXTRA_FRAMES per recording.
+STAGE2_GAP_SAMPLING_POLICY = os.getenv("STAGE2_GAP_SAMPLING_POLICY", "legacy")
+STAGE2_GAP_MIN_MS = _env_int("STAGE2_GAP_MIN_MS", 8000)
+STAGE2_GAP_MAX_EXTRA_FRAMES = _env_int("STAGE2_GAP_MAX_EXTRA_FRAMES", 8)

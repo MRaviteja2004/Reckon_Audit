@@ -68,7 +68,7 @@ def test_frame_description_cannot_pass_without_the_assertion_text():
     )
     verdict = assisted.result.step_verdicts[0]
     assert verdict.passed is False
-    assert FindingType.assertion_not_observed in verdict.finding_types
+    assert FindingType.missing_action in verdict.finding_types
     assert assisted.result.verdict == AuditVerdict.unfaithful
     proposal = next(
         item for item in assisted.assist.proposals

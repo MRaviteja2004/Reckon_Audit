@@ -1,7 +1,17 @@
 """Deterministic equivalence. Base commits before any Agent proposal is considered."""
 
-from reckon.equivalence.grounding import citation_inside, citation_matches, slices_adjacent
-from reckon.equivalence.table import TABLE_VERSION, matching_rule
+from reckon.authentication_intent import claims_authentication
+from reckon.equivalence.grounding import (
+    citation_inside,
+    citation_matches,
+    slices_adjacent,
+)
+from reckon.equivalence.table import (
+    APPLICATION_ICON_RULE_ID,
+    TABLE_VERSION,
+    matching_rule,
+)
+from reckon.ownership import drop_shared_citations, drop_shared_finding_citations
 from reckon.schema import (
     ActionType,
     AuditResult,
@@ -72,6 +82,8 @@ def evaluate(
     )
     if rule is None:
         return "type_not_realized"
+    if rule.rule_id == APPLICATION_ICON_RULE_ID and claims_authentication(step):
+        return "type_not_realized"
     if not _identity_equal(intent, interaction):
         return "identity_mismatch"
     previous, upcoming = fence
@@ -123,11 +135,6 @@ def apply_agent_equivalence(
     if not audit.equivalence_decisions and not proposals:
         return audit
     by_step = {item.expected_step_index: item for item in audit.equivalence_decisions}
-    committed = {
-        item.expected_step_index
-        for item in audit.equivalence_decisions
-        if item.status == "committed"
-    }
     claimed = _claimed(audit)
     fences = _fences(audit)
     actions = {action.index: action for action in observed.actions}
@@ -521,6 +528,8 @@ def _apply_matches(
                 "was released by action equivalence."
             ),
         ))
+    verdicts = drop_shared_citations(verdicts)
+    findings = drop_shared_finding_citations(findings, verdicts)
     passed = sum(1 for verdict in verdicts if verdict.passed)
     total = len(expected.steps)
     return audit.model_copy(update={

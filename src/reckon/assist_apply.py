@@ -1,5 +1,6 @@
 """Apply validated Stage 3 assist proposals to a copy of the deterministic AuditResult."""
 
+from reckon.ownership import reconcile_ownership, split_conflicting_claims
 from reckon.schema import (
     AssistCandidateKind,
     AssistProposalRecord,
@@ -84,7 +85,12 @@ def apply_assist_proposals(
     expected: ExpectedTrace,
     observed: ObservedTrace,
 ) -> AuditResult:
-    """Return a refined audit. Never mutates the deterministic baseline object graph."""
+    """Return a refined audit. Never mutates the deterministic baseline object graph.
+
+    A proposal that would pass a step on another step's observation is ignored.
+    Extra-action findings are reconciled with the final passed verdicts.
+    """
+    accepted, _ = split_conflicting_claims(deterministic, accepted, expected)
     if not accepted:
         return deterministic.model_copy(deep=True)
 
@@ -350,9 +356,33 @@ def apply_assist_proposals(
     passed = sum(1 for verdict in new_verdicts if verdict.passed)
     fidelity_score = passed / total if total > 0 else 1.0
 
-    return AuditResult(
-        verdict=verdict_for_steps(expected.steps, rebuilt, new_verdicts),
-        fidelity_score=fidelity_score,
-        findings=rebuilt,
-        step_verdicts=new_verdicts,
+    final_by_step = {verdict.expected_step_index: verdict for verdict in new_verdicts}
+    released = {
+        verdict.matched_observed_index
+        for verdict in deterministic.step_verdicts
+        if verdict.matched_observed_index is not None
+        and final_by_step[verdict.expected_step_index].matched_observed_index
+        != verdict.matched_observed_index
+    }
+    covered = {
+        index
+        for record in accepted
+        if record.kind == AssistCandidateKind.episode_verification
+        and record.initiation_observed_index is not None
+        and record.completion_observed_index is not None
+        and final_by_step[record.expected_step_index].passed
+        for index in range(
+            record.initiation_observed_index, record.completion_observed_index + 1
+        )
+    }
+    return reconcile_ownership(
+        AuditResult(
+            verdict=verdict_for_steps(expected.steps, rebuilt, new_verdicts),
+            fidelity_score=fidelity_score,
+            findings=rebuilt,
+            step_verdicts=new_verdicts,
+        ),
+        observed,
+        released=released,
+        covered=covered,
     )

@@ -215,6 +215,7 @@ def test_assertion_equivalence_does_not_clear_same_pair_findings():
     )
     expected.steps[0].target = "Success confirmation"
     observed.actions[0].target = "Account panel"
+    observed.actions[0].screen_description = "Success state of the account panel"
     audit = align(expected, observed)
     assert {finding.type for finding in audit.findings} == {
         FindingType.wrong_target,
@@ -2006,10 +2007,100 @@ def test_apply_verdicts_retargets_mentor_dashboard_evidence_away_from_join_confi
         audit, [verdict], expected_trace=expected, observed_trace=observed
     )
 
-    assert refined.findings == []
+    assert [(f.type, f.observed_action_index) for f in refined.findings] == [
+        (FindingType.extra_action, 61)
+    ]
     assert refined.step_verdicts[0].passed is True
     assert refined.step_verdicts[0].matched_observed_index == 70
     assert refined.step_verdicts[0].evidence_timestamp_ms == 240750
+
+
+def test_apply_verdicts_does_not_retarget_onto_another_passed_steps_observation():
+    expected = _expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.assert_visible,
+            target="Mentorship screen",
+            assertion="No learners yet",
+        ),
+        ExpectedStep(
+            index=2,
+            action=ActionType.assert_visible,
+            target="Mentor Dashboard",
+            assertion="The empty Mentor Dashboard is displayed",
+        ),
+    ])
+    observed = _observed([
+        ObservedAction(
+            index=61,
+            timestamp_ms=209765,
+            action=ActionType.assert_visible,
+            target="Join confirmation screen",
+            confidence=0.9,
+            assertion_evidence=AssertionEvidence(
+                description="Success message",
+                visible_text="You've now joined the mentorship programme",
+            ),
+        ),
+        ObservedAction(
+            index=70,
+            timestamp_ms=240750,
+            action=ActionType.assert_visible,
+            target="Mentorship screen",
+            confidence=0.9,
+            assertion_evidence=AssertionEvidence(
+                description="Empty state",
+                visible_text="No learners yet. You'll be alerted soon.",
+            ),
+        ),
+    ])
+    audit = AuditResult(
+        verdict=AuditVerdict.unfaithful,
+        fidelity_score=0.5,
+        findings=[
+            Finding(
+                type=FindingType.assertion_not_observed,
+                severity=FindingSeverity.critical,
+                expected_step_index=2,
+                observed_action_index=61,
+                evidence_timestamp_ms=209765,
+                description="empty dashboard not confirmed",
+            ),
+        ],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=True,
+                matched_observed_index=70,
+                evidence_timestamp_ms=240750,
+            ),
+            StepVerdict(
+                expected_step_index=2,
+                passed=False,
+                matched_observed_index=61,
+                evidence_timestamp_ms=209765,
+                finding_types=[FindingType.assertion_not_observed],
+            ),
+        ],
+    )
+    verdict = CrossCheckVerdict(
+        question="Is the empty Mentor Dashboard visible?",
+        answer=CrossCheckAnswer.present,
+        confidence=0.92,
+        rationale="Empty dashboard visible in later frame",
+        expected_step_index=2,
+        observed_action_index=61,
+        supporting_frame_timestamp_ms=240750,
+    )
+
+    refined = _apply_verdicts(
+        audit, [verdict], expected_trace=expected, observed_trace=observed
+    )
+
+    assert (
+        refined.step_verdicts[1].passed,
+        refined.step_verdicts[1].matched_observed_index,
+    ) == (True, 61)
 
 
 # ---------------------------------------------------------------------------

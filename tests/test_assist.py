@@ -12,6 +12,7 @@ from reckon.assist_propose import _AssistBatchResponse, _AssistDecision
 from reckon.assist_select import select_assist_candidates
 from reckon.assist_validate import validate_assist_decision
 from reckon.crosscheck import select_semantic_candidates
+from reckon.ownership import OWNED_BY_ANOTHER_STEP
 from reckon.schema import (
     ActionType,
     AssertionEvidence,
@@ -555,3 +556,44 @@ def test_accepted_proposal_is_listed_for_stage4_skip():
         skip_pairs={(pair.expected_step_index, pair.observed_action_index)},
     )
     assert remaining == []
+
+
+def test_align_with_assist_reports_a_claim_on_an_owned_observation_as_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    expected = _expected(
+        ExpectedStep(index=1, action=ActionType.click, target="Save button"),
+        ExpectedStep(index=2, action=ActionType.click, target="Refund button"),
+    )
+    observed = _observed(
+        ObservedAction(
+            index=1,
+            timestamp_ms=1000,
+            action=ActionType.click,
+            target="Save button",
+            confidence=0.9,
+        ),
+    )
+    claim = AssistProposalRecord(
+        kind=AssistCandidateKind.episode_verification,
+        status=AssistProposalStatus.accepted,
+        expected_step_index=2,
+        matched_observed_index=1,
+        supporting_observed_index=1,
+        completion_observed_index=1,
+        matching_method=AssistMatchMethod.deterministic,
+    )
+    monkeypatch.setattr(
+        "reckon.assist.verify_trace_against_episodes",
+        lambda *args, **kwargs: ([claim], 0),
+    )
+    monkeypatch.setattr(
+        "reckon.assist.select_assist_candidates", lambda *args, **kwargs: []
+    )
+
+    assisted = align_with_assist(expected, observed, openai_client=MagicMock())
+
+    assert assisted.result.step_verdicts[1].passed is False
+    assert [
+        (record.status, record.reason) for record in assisted.assist.proposals
+    ] == [(AssistProposalStatus.rejected, OWNED_BY_ANOTHER_STEP)]

@@ -1,7 +1,7 @@
 """Controlled live Stage 3 evidence-aware evaluation on eval/aligner_evidence/.
 
-Compares deterministic align(), existing LLM-assisted (evidence_aware=False), and
-evidence-aware (evidence_aware=True) using claude-opus-5-5 via the Uber gateway.
+Compares deterministic align() with evidence-aware assist (evidence_aware=True)
+using claude-opus-5-5 via the Uber gateway.
 
 Stops immediately if any false pass is observed against evidence_steps truth.
 
@@ -29,7 +29,6 @@ from reckon.assist import align_with_assist  # noqa: E402
 from reckon.assist_evidence_propose import ALIGN_EVIDENCE_MODEL  # noqa: E402
 from reckon.assist_evidence_select import select_evidence_bundle_candidates  # noqa: E402
 from reckon.assist_propose import ALIGN_ASSIST_MODEL  # noqa: E402
-from reckon.assist_select import select_assist_candidates  # noqa: E402
 from reckon.parser import make_openai_client  # noqa: E402
 from reckon.schema import ExpectedTrace, ObservedTrace  # noqa: E402
 from reckon.tolerance import assertion_satisfied  # noqa: E402
@@ -357,20 +356,10 @@ def run_case(
     case_dir = EVAL_DIR / case_id
     expected, observed, truth = _load(case_dir)
     baseline = align(expected, observed)
-    classic_candidates = select_assist_candidates(expected, observed, baseline)
     evidence_candidates = select_evidence_bundle_candidates(
         expected, observed, baseline
     )
 
-    before = len(tracker.requests)
-    assisted_classic = align_with_assist(
-        expected,
-        observed,
-        openai_client=tracker,  # type: ignore[arg-type]
-        model=model,
-        evidence_aware=False,
-    )
-    classic_requests = tracker.requests[before:]
     before = len(tracker.requests)
     assisted_evidence = align_with_assist(
         expected,
@@ -381,17 +370,6 @@ def run_case(
     )
     evidence_requests = tracker.requests[before:]
 
-    classic = _path_result(
-        "llm_assisted",
-        assisted_classic,
-        observed,
-        truth,
-        baseline,
-        classic_requests,
-    )
-    classic["assertion_satisfied_checks"] = _assertion_checks(
-        expected, observed, classic["proposals"]
-    )
     evidence = _path_result(
         "evidence_aware",
         assisted_evidence,
@@ -410,18 +388,6 @@ def run_case(
         investigation.append(
             "FALSE_PASS: evidence-aware passed a step that evidence_truth requires to fail"
         )
-    if classic["vs_evidence_truth"]["false_pass"]:
-        # Classic is scored against evidence truth for comparison; also check baseline truth.
-        pass
-    if _step_compare(assisted_classic.result, truth.baseline_steps)["false_pass"] and (
-        truth.baseline_polarity == "broken"
-    ):
-        # Only flag if classic invents a pass vs baseline truth when baseline should fail.
-        classic_vs_base = _step_compare(assisted_classic.result, truth.baseline_steps)
-        if classic_vs_base["false_pass"]:
-            investigation.append(
-                "FALSE_PASS: classic LLM-assisted invented a pass vs baseline_steps"
-            )
     if not evidence["deterministic_preserved"]:
         investigation.append("SAFETY: deterministic_result mutated vs align() baseline")
     if not evidence["reviewed_pairs_accepted_only"]:
@@ -458,15 +424,6 @@ def run_case(
             "step_verdicts": [v.model_dump(mode="json") for v in baseline.step_verdicts],
             "vs_baseline_truth": baseline_cmp,
         },
-        "classic_candidates": [
-            {
-                "candidate_id": c.candidate_id,
-                "kind": c.kind.value,
-                "expected_step_index": c.expected_step_index,
-                "matched_observed_index": c.matched_observed_index,
-            }
-            for c in classic_candidates
-        ],
         "evidence_candidates": [
             {
                 "candidate_id": c.candidate_id,
@@ -477,7 +434,6 @@ def run_case(
             }
             for c in evidence_candidates
         ],
-        "llm_assisted": classic,
         "evidence_aware": evidence,
         "investigation": investigation,
         "stop_recommended": bool(
@@ -576,7 +532,6 @@ def _aggregate(cases: list[dict[str, Any]]) -> dict[str, Any]:
             c["baseline"]["vs_baseline_truth"]["all_match"] for c in cases
         )
         / n,
-        "llm_assisted": _path_agg("llm_assisted"),
         "evidence_aware": _path_agg("evidence_aware"),
         "stop_recommended_cases": [
             c["case_id"] for c in cases if c.get("stop_recommended")

@@ -126,7 +126,7 @@ def test_screen_landing_click_without_evidence_does_not_satisfy_page_assertion()
     )
 
 
-def test_screen_landing_navigate_without_evidence_can_satisfy_page_assertion():
+def test_screen_landing_navigate_without_visible_text_does_not_satisfy_page_assertion():
     obs = ObservedAction(
         index=1,
         timestamp_ms=1000,
@@ -141,7 +141,7 @@ def test_screen_landing_navigate_without_evidence_can_satisfy_page_assertion():
             obs,
             expected_target="GitHub login page",
         )
-        is True
+        is False
     )
 
 
@@ -334,7 +334,7 @@ def test_app_launch_without_split_account_does_not_recover():
     )
 
 
-def test_app_launch_login_worded_recovers_when_account_step_split():
+def test_app_launch_does_not_recover_login_worded_step_when_account_step_split():
     from reckon.episode_interaction import remap_interactions_against_episodes
     from reckon.episodes import cluster_observed_episodes
 
@@ -392,16 +392,7 @@ def test_app_launch_login_worded_recovers_when_account_step_split():
         audit,
         cluster_observed_episodes(observed),
     )
-    assert any(
-        r.expected_step_index == 2
-        and r.status.value == "accepted"
-        and r.supporting_observed_index == 1
-        for r in records
-    )
-    assert not any(
-        r.expected_step_index == 1 and r.status.value == "accepted"
-        for r in records
-    )
+    assert not any(r.status.value == "accepted" for r in records)
 
 
 def test_mentor_feed_card_not_satisfied_by_deeplink_launch():
@@ -599,7 +590,9 @@ def test_p0_stage2c_timestamp_recovery_clears_wrong_target_on_assertion_step():
     refined = apply_assist_proposals(deterministic, accepted, expected, observed)
     assert refined.step_verdicts[0].passed is True
     assert refined.step_verdicts[0].cleared_by_assist is True
-    assert refined.findings == []
+    assert [(f.type, f.observed_action_index) for f in refined.findings] == [
+        (FindingType.extra_action, 1)
+    ]
 
 
 def test_p0_wrong_input_value_remains_protected():

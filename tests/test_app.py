@@ -6,7 +6,23 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from reckon.latency import LatencyMetrics, WindowLatency
+from reckon.persistence import (
+    RECORDINGS_DIR_ENV,
+    STAGE1_FILENAME,
+    STAGE2_FILENAME,
+    RecordingStore,
+    RunStatus,
+    Stage3Mode,
+    build_stage1_artifact,
+    build_stage2_artifact,
+    run_stage3,
+    utc_now,
+)
+from reckon.persistence import extraction as persistence_extraction
+from reckon.persistence import runner as persistence_runner
 from reckon.schema import (
     ActionType,
     AssertionEvidence,
@@ -41,6 +57,13 @@ _APP_SPEC = importlib.util.spec_from_file_location("reckon_streamlit_app", _APP_
 assert _APP_SPEC is not None and _APP_SPEC.loader is not None
 app = importlib.util.module_from_spec(_APP_SPEC)
 _APP_SPEC.loader.exec_module(app)
+
+
+@pytest.fixture(autouse=True)
+def recordings_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "recordings"
+    monkeypatch.setenv(RECORDINGS_DIR_ENV, str(root))
+    return root
 
 
 def _export_models() -> tuple[
@@ -286,11 +309,11 @@ def test_pipeline_uses_semantic_only_refined_result():
         patch.object(app, "st", streamlit),
         patch.object(app, "make_openai_client", return_value=MagicMock()),
         patch.object(app, "parse_scenario", return_value=expected),
-        patch.object(app, "make_client", return_value=MagicMock()),
-        patch.object(app, "extract_observed_trace", return_value=observed),
-        patch.object(app, "align", return_value=initial) as align_mock,
-        patch.object(app, "align_with_assist") as assist_mock,
-        patch.object(app, "run_cross_check", return_value=report) as cross_mock,
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", return_value=observed),
+        patch.object(persistence_runner, "align", return_value=initial) as align_mock,
+        patch.object(persistence_runner, "align_with_assist") as assist_mock,
+        patch.object(persistence_runner, "run_cross_check", return_value=report) as cross_mock,
     ):
         result = app._run_pipeline(
             b"video",
@@ -367,10 +390,10 @@ def test_pipeline_evidence_aware_mode_passes_evidence_aware_flag():
         patch.object(app, "st", streamlit),
         patch.object(app, "make_openai_client", return_value=MagicMock()),
         patch.object(app, "parse_scenario", return_value=expected),
-        patch.object(app, "make_client", return_value=MagicMock()),
-        patch.object(app, "extract_observed_trace", return_value=observed),
-        patch.object(app, "align_with_assist", return_value=bundle) as assist_mock,
-        patch.object(app, "run_cross_check", return_value=CrossCheckReport(
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", return_value=observed),
+        patch.object(persistence_runner, "align_with_assist", return_value=bundle) as assist_mock,
+        patch.object(persistence_runner, "run_cross_check", return_value=CrossCheckReport(
             verdicts=[], refined_result=deterministic
         )),
     ):
@@ -387,7 +410,7 @@ def test_pipeline_evidence_aware_mode_passes_evidence_aware_flag():
     assert streamlit.session_state["export"]["stage3_mode"] == app.STAGE3_MODE_EVIDENCE
 
 
-def test_pipeline_assisted_mode_calls_align_with_assist_and_skips_accepted_pairs():
+def test_pipeline_evidence_mode_calls_align_with_assist_and_skips_accepted_pairs():
     expected = ExpectedTrace(
         scenario_title="test",
         steps=[ExpectedStep(index=1, action=ActionType.click, target="Sign in")],
@@ -461,18 +484,18 @@ def test_pipeline_assisted_mode_calls_align_with_assist_and_skips_accepted_pairs
         patch.object(app, "st", streamlit),
         patch.object(app, "make_openai_client", return_value=MagicMock()),
         patch.object(app, "parse_scenario", return_value=expected),
-        patch.object(app, "make_client", return_value=MagicMock()),
-        patch.object(app, "extract_observed_trace", return_value=observed),
-        patch.object(app, "align") as align_mock,
-        patch.object(app, "align_with_assist", return_value=bundle) as assist_mock,
-        patch.object(app, "run_cross_check", return_value=report) as cross_mock,
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", return_value=observed),
+        patch.object(persistence_runner, "align") as align_mock,
+        patch.object(persistence_runner, "align_with_assist", return_value=bundle) as assist_mock,
+        patch.object(persistence_runner, "run_cross_check", return_value=report) as cross_mock,
     ):
         result = app._run_pipeline(
             b"video",
             "recording.mp4",
             "Click Sign in",
             run_crosscheck=True,
-            stage3_mode=app.STAGE3_MODE_ASSISTED,
+            stage3_mode=app.STAGE3_MODE_EVIDENCE,
         )
 
     assert result is not None
@@ -481,23 +504,25 @@ def test_pipeline_assisted_mode_calls_align_with_assist_and_skips_accepted_pairs
     assist_mock.assert_called_once()
     assist_kwargs = assist_mock.call_args.kwargs
     assert assist_kwargs["model"] == app.ALIGN_ASSIST_MODEL
-    assert assist_kwargs.get("evidence_aware") is False
-    assert assist_mock.call_args.args[0] is expected
-    assert assist_mock.call_args.args[1] is observed
+    assert assist_kwargs.get("evidence_aware") is True
+    assert assist_kwargs.get("frame_evidence") is True
+    assert assist_kwargs.get("frame_manifest") is not None
+    assert assist_mock.call_args.args[0] == expected
+    assert assist_mock.call_args.args[1] == observed
     skip_pairs = cross_mock.call_args.kwargs.get("skip_semantic_pairs")
     assert skip_pairs == {(1, 1)}
     assert streamlit.session_state["stage3_assist"] is assist
     assert streamlit.session_state["deterministic_stage3"] is deterministic
     assert streamlit.session_state["assisted_stage3"] is assisted
     export = streamlit.session_state["export"]
-    assert export["stage3_mode"] == app.STAGE3_MODE_ASSISTED
+    assert export["stage3_mode"] == app.STAGE3_MODE_EVIDENCE
     assert export["stage3_assist"]["assist"]["model"] == "claude-opus-5-5"
     assert export["stage3_assist"]["deterministic_audit_result"]["verdict"] == "unfaithful"
     assert export["stage3_assist"]["assisted_audit_result"]["verdict"] == "faithful"
     assert export["original_audit_result"]["verdict"] == "faithful"
 
 
-def test_pipeline_assisted_rejected_pairs_are_not_skipped_in_stage4():
+def test_pipeline_evidence_rejected_pairs_are_not_skipped_in_stage4():
     expected = ExpectedTrace(
         scenario_title="test",
         steps=[ExpectedStep(index=1, action=ActionType.click, target="Sign in")],
@@ -540,28 +565,21 @@ def test_pipeline_assisted_rejected_pairs_are_not_skipped_in_stage4():
         patch.object(app, "st", streamlit),
         patch.object(app, "make_openai_client", return_value=MagicMock()),
         patch.object(app, "parse_scenario", return_value=expected),
-        patch.object(app, "make_client", return_value=MagicMock()),
-        patch.object(app, "extract_observed_trace", return_value=observed),
-        patch.object(app, "align_with_assist", return_value=bundle),
-        patch.object(app, "run_cross_check", return_value=report) as cross_mock,
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", return_value=observed),
+        patch.object(persistence_runner, "align_with_assist", return_value=bundle),
+        patch.object(persistence_runner, "run_cross_check", return_value=report) as cross_mock,
     ):
         result = app._run_pipeline(
             b"video",
             "recording.mp4",
             "Click Sign in",
             run_crosscheck=True,
-            stage3_mode=app.STAGE3_MODE_ASSISTED,
+            stage3_mode=app.STAGE3_MODE_EVIDENCE,
         )
 
     assert result is not None
     assert cross_mock.call_args.kwargs.get("skip_semantic_pairs") == set()
-
-
-def test_reviewed_skip_pairs_only_includes_accepted():
-    assist = _assist_report(accepted=True)
-    assert app._reviewed_skip_pairs(assist) == {(1, 1)}
-    rejected = _assist_report(accepted=False)
-    assert app._reviewed_skip_pairs(rejected) == set()
 
 
 def test_render_stage3_assist_panel_shows_comparison_and_metrics():
@@ -699,7 +717,7 @@ def test_render_semantic_diagnostics_shows_applied_result():
     )
 
 
-def test_pipeline_accepts_file_like_recording():
+def test_pipeline_accepts_file_like_recording(recordings_root: Path):
     expected = ExpectedTrace(
         scenario_title="test",
         steps=[ExpectedStep(index=1, action=ActionType.click, target="Submit")],
@@ -748,9 +766,9 @@ def test_pipeline_accepts_file_like_recording():
         patch.object(app, "st", streamlit),
         patch.object(app, "make_openai_client", return_value=MagicMock()),
         patch.object(app, "parse_scenario", return_value=expected),
-        patch.object(app, "make_client", return_value=MagicMock()),
-        patch.object(app, "extract_observed_trace", side_effect=_capture_extract),
-        patch.object(app, "align", return_value=audit),
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", side_effect=_capture_extract),
+        patch.object(persistence_runner, "align", return_value=audit),
     ):
         result = app._run_pipeline(
             BytesIO(b"file-like-video"),
@@ -762,7 +780,8 @@ def test_pipeline_accepts_file_like_recording():
     assert result is not None
     assert result[0] is audit
     assert written
-    assert not written[0].exists()
+    assert written[0].exists()
+    assert written[0].parent.parent == recordings_root
 
 
 def test_pipeline_does_not_pass_latency_kwarg_to_extract_observed_trace():
@@ -821,9 +840,9 @@ def test_pipeline_does_not_pass_latency_kwarg_to_extract_observed_trace():
         patch.object(app, "st", streamlit),
         patch.object(app, "make_openai_client", return_value=MagicMock()),
         patch.object(app, "parse_scenario", return_value=expected),
-        patch.object(app, "make_client", return_value=MagicMock()),
-        patch.object(app, "extract_observed_trace", side_effect=extract_without_latency_kwarg),
-        patch.object(app, "align", return_value=audit),
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", side_effect=extract_without_latency_kwarg),
+        patch.object(persistence_runner, "align", return_value=audit),
     ):
         result = app._run_pipeline(
             b"video-bytes",
@@ -1131,3 +1150,142 @@ def test_help_text_does_not_mention_gemini_file_api():
     source = _APP_PATH.read_text()
     assert "Gemini File API" not in source
     assert re.search(r"OpenAI-compatible gateway", source)
+
+
+def _streamlit_mock() -> MagicMock:
+    streamlit = MagicMock()
+    streamlit.session_state = {}
+    status_context = MagicMock()
+    status_context.__enter__.return_value = MagicMock()
+    status_context.__exit__.return_value = False
+    streamlit.status.return_value = status_context
+    return streamlit
+
+
+def _simple_traces() -> tuple[ExpectedTrace, ObservedTrace, AuditResult]:
+    expected = ExpectedTrace(
+        scenario_title="TC 7: Submit form",
+        steps=[ExpectedStep(index=1, action=ActionType.click, target="Submit")],
+    )
+    observed = ObservedTrace(
+        source_file="submit.mp4",
+        actions=[
+            ObservedAction(
+                index=1, timestamp_ms=1000, action=ActionType.click, target="Submit", confidence=0.95
+            )
+        ],
+    )
+    audit = AuditResult(
+        verdict=AuditVerdict.faithful,
+        fidelity_score=1.0,
+        findings=[],
+        step_verdicts=[StepVerdict(expected_step_index=1, passed=True, matched_observed_index=1)],
+    )
+    return expected, observed, audit
+
+
+def test_pipeline_persists_every_stage_and_links_stage4_to_stage3(recordings_root: Path):
+    expected, observed, audit = _simple_traces()
+    report = CrossCheckReport(verdicts=[], refined_result=audit)
+    with (
+        patch.object(app, "st", _streamlit_mock()),
+        patch.object(app, "make_openai_client", return_value=MagicMock()),
+        patch.object(app, "parse_scenario", return_value=expected),
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", return_value=observed),
+        patch.object(persistence_runner, "run_cross_check", return_value=report),
+    ):
+        result = app._run_pipeline(b"video", "submit.mp4", "Click Submit", run_crosscheck=True)
+
+    store = RecordingStore(recordings_root)
+    [recording] = store.list_recordings()
+    assert result is not None
+    assert recording.recording_id == "TC_7_Submit_form"
+    assert store.load_stage1(recording.recording_id).expected_trace == expected
+    assert store.load_stage2(recording.recording_id).observed_trace == observed
+    assert store.video_path(recording.recording_id).read_bytes() == b"video"
+    [stage3] = store.list_stage3(recording.recording_id)
+    [stage4] = store.list_stage4(recording.recording_id)
+    assert stage3.status == RunStatus.completed
+    assert stage4.stage3_version == stage3.version
+    assert stage4.stage3_sha256 == store.stage3_sha256(recording.recording_id, stage3.version)
+
+
+def test_pipeline_stage1_failure_creates_no_recording(recordings_root: Path):
+    with (
+        patch.object(app, "st", _streamlit_mock()),
+        patch.object(app, "make_openai_client", return_value=MagicMock()),
+        patch.object(app, "parse_scenario", side_effect=ValueError("unparseable")),
+    ):
+        result = app._run_pipeline(b"video", "submit.mp4", "???", run_crosscheck=False)
+
+    assert result is None
+    assert RecordingStore(recordings_root).list_recordings() == []
+
+
+def test_pipeline_interrupted_in_stage2_keeps_completed_stage1_and_video(recordings_root: Path):
+    expected, _observed, _audit = _simple_traces()
+    with (
+        patch.object(app, "st", _streamlit_mock()),
+        patch.object(app, "make_openai_client", return_value=MagicMock()),
+        patch.object(app, "parse_scenario", return_value=expected),
+        patch.object(persistence_extraction, "make_client", return_value=MagicMock()),
+        patch.object(persistence_extraction, "extract_observed_trace", side_effect=RuntimeError("gateway down")),
+    ):
+        result = app._run_pipeline(b"video", "submit.mp4", "Click Submit", run_crosscheck=True)
+
+    store = RecordingStore(recordings_root)
+    [recording] = store.list_recordings()
+    assert result is None
+    assert store.has_artifact(recording.recording_id, STAGE1_FILENAME)
+    assert not store.has_artifact(recording.recording_id, STAGE2_FILENAME)
+    assert store.video_path(recording.recording_id) is not None
+    assert store.list_stage3(recording.recording_id) == []
+
+
+def test_run_saved_stage3_reports_missing_stage2(recordings_root: Path):
+    expected, _observed, _audit = _simple_traces()
+    store = RecordingStore(recordings_root)
+    recording_id = store.create_recording(
+        title="TC 7", source_filename="submit.mp4", scenario_text="Click Submit"
+    ).recording_id
+    store.save_stage1(
+        recording_id,
+        build_stage1_artifact(
+            expected, started_at=utc_now(), duration_ms=1.0
+        ),
+    )
+    streamlit = _streamlit_mock()
+    with patch.object(app, "st", streamlit):
+        result = app._run_saved_stage(store, recording_id, action="stage3")
+
+    assert result is None
+    assert "stage-2.json is missing" in streamlit.error.call_args.args[0]
+    assert store.list_stage3(recording_id) == []
+
+
+def test_run_saved_stage4_presents_the_selected_stage3_and_new_stage4(recordings_root: Path):
+    expected, observed, audit = _simple_traces()
+    store = RecordingStore(recordings_root)
+    recording_id = store.create_recording(
+        title="TC 7", source_filename="submit.mp4", scenario_text="Click Submit"
+    ).recording_id
+    now = utc_now()
+    store.save_stage1(recording_id, build_stage1_artifact(expected, started_at=now, duration_ms=1.0))
+    store.save_stage2(recording_id, build_stage2_artifact(observed, started_at=now, duration_ms=1.0))
+    store.write_video(recording_id, lambda handle: handle.write(b"video"))
+    stage3 = run_stage3(store, recording_id, mode=Stage3Mode.deterministic)
+    report = CrossCheckReport(verdicts=[], refined_result=audit)
+    streamlit = _streamlit_mock()
+    with (
+        patch.object(app, "st", streamlit),
+        patch.object(persistence_runner, "run_cross_check", return_value=report),
+    ):
+        result = app._run_saved_stage(store, recording_id, action="stage4", stage3_version=stage3.version)
+
+    assert result is not None
+    assert result[0] == audit
+    export = streamlit.session_state["export"]
+    assert export["original_audit_result"] == stage3.result.model_dump(mode="json")
+    assert export["stage3_mode"] == app.STAGE3_MODE_DETERMINISTIC
+    assert [item.stage3_version for item in store.list_stage4(recording_id)] == [stage3.version]

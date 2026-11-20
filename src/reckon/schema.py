@@ -2,7 +2,7 @@ import math
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, NonNegativeInt, field_validator, model_validator
 
 
 def _blank_str_to_none(value: object) -> object:
@@ -175,6 +175,58 @@ class ExpectedActionIntent(BaseModel):
         return self
 
 
+class IntentParseStatus(str, Enum):
+    bound = "bound"
+    omitted = "omitted"
+    rejected = "rejected"
+
+
+class IntentRejectionReason(str, Enum):
+    """Why application-side validation refused an intent the model did offer."""
+
+    missing_field = "missing_field"
+    unsupported_operation = "unsupported_operation"
+    unsupported_kind = "unsupported_kind"
+    step_span_unavailable = "step_span_unavailable"
+    invalid_citation = "invalid_citation"
+    ambiguous_citation = "ambiguous_citation"
+    binding_failed = "binding_failed"
+
+
+class IntentDiagnostic(BaseModel):
+    """Outcome of binding one step's intent. Holds no scenario text, only vocabulary tokens."""
+
+    step_index: int = Field(ge=1)
+    status: IntentParseStatus
+    reason: IntentRejectionReason | None = Field(
+        default=None,
+        description="Set exactly when status is rejected. An omitted intent has no reason.",
+    )
+    slot: str | None = Field(
+        default=None,
+        description="Slot that failed: operation, operation_text, kind, kind_text, name, ...",
+    )
+    offered_operation: str | None = Field(
+        default=None, description="Normalised operation token the model offered, if sane"
+    )
+    offered_kind: str | None = Field(
+        default=None, description="Normalised kind token the model offered, if sane"
+    )
+
+    @model_validator(mode="after")
+    def reason_matches_status(self) -> "IntentDiagnostic":
+        if (self.status == IntentParseStatus.rejected) != (self.reason is not None):
+            raise ValueError("reason is required when rejected and forbidden otherwise")
+        return self
+
+
+class IntentParseReport(BaseModel):
+    """Stage 1 intent outcomes, one per scenario step the parser bound or refused."""
+
+    contract_version: str = Field(min_length=1)
+    diagnostics: list[IntentDiagnostic] = Field(default_factory=list)
+
+
 class ObservedElement(BaseModel):
     kind: ElementKind = ElementKind.unspecified
     kind_citation: Optional[SlotCitation] = None
@@ -201,6 +253,55 @@ class ObservedInteraction(BaseModel):
         default=None,
         description="Screen episode for review. Not a control identity.",
     )
+
+
+class InteractionParseStatus(str, Enum):
+    bound = "bound"
+    omitted = "omitted"
+    rejected = "rejected"
+
+
+class InteractionRejectionReason(str, Enum):
+    """Why application-side validation refused an interaction the model did report."""
+
+    missing_field = "missing_field"
+    unsupported_operation = "unsupported_operation"
+    unsupported_kind = "unsupported_kind"
+    unsupported_surface = "unsupported_surface"
+    surface_unavailable = "surface_unavailable"
+    operation_contradicts_action = "operation_contradicts_action"
+    invalid_citation = "invalid_citation"
+    ambiguous_citation = "ambiguous_citation"
+    binding_failed = "binding_failed"
+
+
+class ObservedInteractionDiagnostic(BaseModel):
+    """Outcome of binding one observation's interaction. Holds no screen text."""
+
+    contract_version: str = Field(min_length=1)
+    status: InteractionParseStatus
+    reason: InteractionRejectionReason | None = Field(
+        default=None,
+        description="Set exactly when status is rejected. An omitted interaction has no reason.",
+    )
+    slot: str | None = Field(
+        default=None, description="Slot that failed: operation, kind, kind_text, name, ..."
+    )
+    offered_operation: str | None = Field(
+        default=None, description="Normalised operation token the model offered, if sane"
+    )
+    offered_kind: str | None = Field(
+        default=None, description="Normalised kind token the model offered, if sane"
+    )
+    offered_surface: str | None = Field(
+        default=None, description="Normalised surface token the model offered, if sane"
+    )
+
+    @model_validator(mode="after")
+    def reason_matches_status(self) -> "ObservedInteractionDiagnostic":
+        if (self.status == InteractionParseStatus.rejected) != (self.reason is not None):
+            raise ValueError("reason is required when rejected and forbidden otherwise")
+        return self
 
 
 class EquivalenceMatch(BaseModel):
@@ -291,6 +392,10 @@ class ExpectedTrace(BaseModel):
         default_factory=list,
         description="Domain macros applied during Stage 1 (opt-in provenance)",
     )
+    intent_report: IntentParseReport | None = Field(
+        default=None,
+        description="Why each step's intent was bound, omitted or rejected. Unset on legacy traces.",
+    )
 
     @model_validator(mode="after")
     def steps_must_be_sequential(self) -> "ExpectedTrace":
@@ -347,6 +452,10 @@ class ObservedAction(BaseModel):
         default=None,
         description="Structured interaction with citations into target, input_value, or visible_text.",
     )
+    interaction_diagnostic: ObservedInteractionDiagnostic | None = Field(
+        default=None,
+        description="Why the interaction was bound, omitted or rejected. Unset on legacy traces.",
+    )
 
     _normalize_blanks = field_validator(
         "target", "input_value", "screen_description", mode="before",
@@ -373,6 +482,13 @@ class ObservedTrace(BaseModel):
         description="End offset of this clip within the full recording, in milliseconds. None means the clip runs to the end of the recording.",
     )
     actions: list[ObservedAction]
+    gap_sample_timestamps_ms: list[NonNegativeInt] = Field(
+        default_factory=list,
+        description=(
+            "Recording-absolute times of frames sampled to cover quiet stretches. "
+            "Visual evidence for Stage 2C to search, never an observation."
+        ),
+    )
 
     @model_validator(mode="after")
     def clip_end_must_be_after_offset(self) -> "ObservedTrace":
@@ -730,9 +846,6 @@ class FrameManifest(BaseModel):
             if entry.frame_id.strip().upper() == key:
                 return entry.timestamp_ms
         return None
-
-    def known_ids(self) -> set[str]:
-        return {entry.frame_id.strip().upper() for entry in self.frames}
 
 
 class CandidateEvidenceItem(BaseModel):

@@ -14,7 +14,12 @@ from reckon.extractor import (
     _resolve_frame_index,
     extract_window,
 )
-from reckon.schema import ActionType, ObservedTrace
+from reckon.schema import (
+    ActionType,
+    InteractionParseStatus,
+    InteractionRejectionReason,
+    ObservedTrace,
+)
 
 _VIDEO = Path("recording.mp4")
 _SOURCE = "recording.mp4"
@@ -339,3 +344,85 @@ def test_extract_window_survives_transient_503():
     ):
         trace = extract_window(client, _VIDEO, _SOURCE, [0])
     assert len(trace.actions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Interaction binding and diagnostics on extracted observations
+# ---------------------------------------------------------------------------
+
+def _interaction_fields(**overrides: str | None) -> dict[str, str | None]:
+    fields = {
+        "interaction_operation": "activate",
+        "interaction_kind": "button",
+        "interaction_kind_text": "button",
+        "interaction_name": "Sign in",
+        "interaction_surface": "target",
+    }
+    fields.update(overrides)
+    return fields
+
+
+def _extract(actions: list[_ExtractedAction]) -> ObservedTrace:
+    with patch("reckon.extractor.extract_frames_at", return_value=_samples([0, 500])):
+        return extract_window(_client(actions), _VIDEO, _SOURCE, [0, 500])
+
+
+def test_extract_window_attaches_a_bound_interaction_to_its_observation():
+    trace = _extract([_action(frame_index=2, target="Sign in button", **_interaction_fields())])
+
+    observed = trace.actions[0]
+    assert (observed.interaction.element.name, observed.interaction.cited_frame_index) == (
+        "Sign in", 2,
+    )
+    assert observed.interaction_diagnostic.status == InteractionParseStatus.bound
+
+
+def test_extract_window_records_an_omitted_interaction():
+    trace = _extract([_action(target="Sign in")])
+
+    observed = trace.actions[0]
+    assert (observed.interaction, observed.interaction_diagnostic.status) == (
+        None, InteractionParseStatus.omitted,
+    )
+
+
+def test_extract_window_records_why_an_interaction_was_rejected():
+    trace = _extract([_action(target="Sign in", **_interaction_fields())])
+
+    observed = trace.actions[0]
+    assert observed.interaction is None
+    assert observed.interaction_diagnostic.reason == InteractionRejectionReason.invalid_citation
+
+
+def test_extract_window_keeps_the_observation_when_its_interaction_is_rejected():
+    trace = _extract([_action(target="Sign in", **_interaction_fields(interaction_kind="textbox"))])
+
+    assert (trace.actions[0].action, trace.actions[0].target) == (ActionType.click, "Sign in")
+
+
+def test_extract_window_gives_every_observation_a_diagnostic():
+    trace = _extract([
+        _action(target="Sign in button", **_interaction_fields()),
+        _action(target="Next"),
+        _action(target="Sign in", **_interaction_fields()),
+    ])
+
+    assert [a.interaction_diagnostic.status for a in trace.actions] == [
+        InteractionParseStatus.bound,
+        InteractionParseStatus.omitted,
+        InteractionParseStatus.rejected,
+    ]
+
+
+def test_extract_window_never_cites_screen_description():
+    trace = _extract([
+        _action(
+            target="Next",
+            screen_description="Sign in button",
+            **_interaction_fields(interaction_surface="screen_description"),
+        )
+    ])
+
+    assert trace.actions[0].interaction_diagnostic.reason == (
+        InteractionRejectionReason.unsupported_surface
+    )

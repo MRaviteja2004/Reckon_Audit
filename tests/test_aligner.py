@@ -8,7 +8,6 @@ from reckon.aligner import (
     _action_match_score,
     _classify_pair,
     _dp_align,
-    _screen_description_supports_assertion,
     _target_similarity,
     align,
 )
@@ -557,10 +556,10 @@ def test_align_assertion_rejects_exact_text_on_only_unrelated_target():
         for finding in result.findings
         if finding.expected_step_index == 1
     }
-    assert FindingType.wrong_target in findings
-    assert FindingType.assertion_not_observed in findings
-    assert findings[FindingType.assertion_not_observed].severity == FindingSeverity.critical
+    assert set(findings) == {FindingType.missing_action}
+    assert findings[FindingType.missing_action].severity == FindingSeverity.critical
     assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
     assert result.verdict == AuditVerdict.unfaithful
 
 
@@ -620,6 +619,645 @@ def test_align_dismissal_prefers_close_control_over_unrelated_click():
     assert result.step_verdicts[0].passed is True
     assert result.step_verdicts[0].matched_observed_index == 2
     assert result.step_verdicts[0].evidence_timestamp_ms == 2000
+
+
+def test_align_select_matches_click_on_the_same_choice_control():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="terms and conditions checkbox",
+            raw_text="Select the terms and conditions checkbox",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=72500,
+            action=ActionType.click,
+            target="I agree to the Terms and Conditions checkbox",
+            confidence=0.9,
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+    assert result.step_verdicts[0].matched_observed_index == 1
+    assert result.step_verdicts[0].evidence_timestamp_ms == 72500
+    assert result.findings == []
+
+
+def test_align_select_matches_choice_click_after_earlier_pairs_pass_it():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.assert_text,
+            target="Mentorship program benefits",
+            assertion="Earn extra for mentoring",
+        ),
+        ExpectedStep(
+            index=2,
+            action=ActionType.assert_text,
+            target="Mentorship program benefits",
+            assertion="Share your expertise and tips",
+        ),
+        ExpectedStep(
+            index=3,
+            action=ActionType.assert_text,
+            target="Mentorship program benefits",
+            assertion="Build community with other drivers",
+        ),
+        ExpectedStep(
+            index=4,
+            action=ActionType.select,
+            target="terms and conditions checkbox",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=72500,
+            action=ActionType.click,
+            target="I agree to the Terms and Conditions checkbox",
+            confidence=0.9,
+        ),
+        _obs(2, ActionType.assert_state, "Join Mentorship", timestamp_ms=80000),
+        _obs(3, ActionType.assert_state, "Join Mentorship button", timestamp_ms=81000),
+        _obs(4, ActionType.assert_visible, "Success confirmation", timestamp_ms=82000),
+    ])
+
+    result = align(expected, observed)
+
+    matched = result.step_verdicts[3]
+    assert matched.passed is True
+    assert matched.matched_observed_index == 1
+    assert matched.evidence_timestamp_ms == 72500
+    assert [verdict.passed for verdict in result.step_verdicts[:3]] == [False, False, False]
+
+
+def test_align_select_does_not_match_a_different_choice_control():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="terms and conditions checkbox",
+        ),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "English checkbox", timestamp_ms=41000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+    assert result.step_verdicts[0].finding_types == [FindingType.missing_action]
+
+
+@pytest.mark.parametrize(
+    ("expected_target", "observed_target"),
+    [
+        ("English checkbox", "Spanish checkbox"),
+        ("Dark mode switch", "Light mode switch"),
+        ("Marketing emails checkbox", "Marketing SMS checkbox"),
+    ],
+)
+def test_align_select_rejects_sibling_choice_control(
+    expected_target: str,
+    observed_target: str,
+):
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.select, target=expected_target),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, observed_target, timestamp_ms=41000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_rejects_plan_b_for_plan_a():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.select, target="Plan A"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Plan B radio button", timestamp_ms=2000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_keeps_single_character_plan_identity():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.select, target="Plan A"),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=2000,
+            action=ActionType.click,
+            target="Plan A radio button",
+            confidence=0.9,
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+    assert result.step_verdicts[0].matched_observed_index == 1
+    assert result.step_verdicts[0].evidence_timestamp_ms == 2000
+
+
+def test_align_select_rejects_opening_the_dropdown():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="language dropdown",
+            input_value="English",
+            raw_text="Select English",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=3000,
+            action=ActionType.click,
+            target="Language dropdown",
+            confidence=0.9,
+            screen_description="Dropdown list opened showing English, Spanish",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_matches_english_option_row():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="language dropdown",
+            input_value="English",
+            raw_text="Select English",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=3000,
+            action=ActionType.click,
+            target="English option row",
+            confidence=0.9,
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+    assert result.step_verdicts[0].matched_observed_index == 1
+    assert result.step_verdicts[0].evidence_timestamp_ms == 3000
+
+
+def test_align_select_rejects_explicit_unchecked_result():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="terms and conditions checkbox",
+            raw_text="Select the terms and conditions checkbox",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=72500,
+            action=ActionType.click,
+            target="I agree to the Terms and Conditions checkbox",
+            confidence=0.9,
+            screen_description="Terms checkbox now unchecked",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_without_state_description_matches_same_control():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="terms and conditions checkbox",
+        ),
+    ])
+    observed = _make_observed([
+        _obs(
+            1,
+            ActionType.click,
+            "I agree to the Terms and Conditions checkbox",
+            timestamp_ms=72500,
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+    assert result.step_verdicts[0].evidence_timestamp_ms == 72500
+
+
+def test_align_select_does_not_treat_switch_account_button_as_choice():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.select, target="Switch account button"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Switch account button", timestamp_ms=1000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_stays_unmatched_when_two_controls_share_the_identity():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.select, target="notifications"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Email notifications switch", timestamp_ms=1000),
+        _obs(2, ActionType.click, "SMS notifications switch", timestamp_ms=2000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_rejects_turn_off_instruction():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="Notifications switch",
+            raw_text="Turn off notifications",
+        ),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Notifications switch", timestamp_ms=1000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_does_not_match_ordinary_button_click():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.select,
+            target="Continue button",
+        ),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Continue button", timestamp_ms=94750),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+    assert result.step_verdicts[0].finding_types == [FindingType.missing_action]
+
+
+def test_align_targetless_dismiss_matches_verified_close_control():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target=None,
+            raw_text="Dismiss terms after reading",
+        ),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Next arrow button", timestamp_ms=1000),
+        ObservedAction(
+            index=2,
+            timestamp_ms=33500,
+            action=ActionType.click,
+            target="X close button",
+            confidence=0.9,
+            screen_description="Terms page dismissed, back to language selection",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+    assert result.step_verdicts[0].matched_observed_index == 2
+    assert result.step_verdicts[0].evidence_timestamp_ms == 33500
+    assert expected.steps[0].target is None
+
+
+def test_align_targetless_dismiss_does_not_match_next_arrow():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target=None,
+            raw_text="Dismiss terms after reading",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=115750,
+            action=ActionType.click,
+            target="Next arrow button",
+            confidence=0.9,
+            screen_description="Terms page dismissed, back to language selection",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+    assert result.step_verdicts[0].finding_types == [FindingType.missing_action]
+
+
+@pytest.mark.parametrize(
+    "screen_description",
+    [
+        "Terms page was not dismissed",
+        "Failed to close terms",
+    ],
+)
+def test_align_targetless_dismiss_rejects_negated_dismissal(
+    screen_description: str,
+):
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target=None,
+            raw_text="Dismiss terms after reading",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=33500,
+            action=ActionType.click,
+            target="X close button",
+            confidence=0.9,
+            screen_description=screen_description,
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+    assert expected.steps[0].target is None
+
+
+def test_align_targetless_dismiss_rejects_overlay_that_remains_open():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target=None,
+            raw_text="Dismiss terms after reading",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=33500,
+            action=ActionType.click,
+            target="X close button",
+            confidence=0.9,
+            screen_description="Terms dialog remains open",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_targetless_dismiss_rejects_a_different_overlay_clause():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target=None,
+            raw_text="Dismiss terms after reading",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=33500,
+            action=ActionType.click,
+            target="Close button on privacy dialog",
+            confidence=0.9,
+            screen_description="Privacy dialog closed, back to terms page",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+    assert expected.steps[0].target is None
+
+
+def test_align_click_on_sibling_choice_control_reports_wrong_target():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.click, target="English checkbox"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Spanish checkbox", timestamp_ms=41000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].finding_types == [FindingType.wrong_target]
+
+
+def test_align_click_matches_same_choice_control_recorded_as_select():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.click, target="Remember me checkbox"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.select, "Remember me checkbox", timestamp_ms=4000),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+    assert result.step_verdicts[0].matched_observed_index == 1
+    assert result.step_verdicts[0].evidence_timestamp_ms == 4000
+
+
+def test_align_click_on_dropdown_does_not_match_a_select_event():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.click, target="Country dropdown"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.select, "Country dropdown", input_value="India"),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+@pytest.mark.parametrize(
+    ("raw_text", "screen_description"),
+    [
+        ("Turn on notifications", "Notifications switched off"),
+        ("Uncheck the newsletter checkbox", "Newsletter checkbox now checked"),
+    ],
+)
+def test_align_click_with_contradicting_resulting_state_is_not_observed(
+    raw_text: str,
+    screen_description: str,
+):
+    target = (
+        "Notifications switch" if "notifications" in raw_text else "Newsletter checkbox"
+    )
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.click, target=target, raw_text=raw_text),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=1000,
+            action=ActionType.click,
+            target=target,
+            confidence=0.9,
+            screen_description=screen_description,
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].finding_types == [FindingType.missing_action]
+
+
+def test_align_click_with_matching_resulting_state_passes():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target="Notifications switch",
+            raw_text="Turn on notifications",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=1000,
+            action=ActionType.click,
+            target="Notifications switch",
+            confidence=0.9,
+            screen_description="Notifications switched on",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is True
+
+
+def test_align_text_assertion_is_not_proved_by_an_interaction():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.assert_text,
+            target="confirmation",
+            assertion="You have joined",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=1000,
+            action=ActionType.click,
+            target="Join button",
+            confidence=0.9,
+            screen_description="You have joined",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+
+
+def test_align_select_then_click_in_wrong_order_does_not_pass_both():
+    expected = _make_expected([
+        ExpectedStep(index=1, action=ActionType.select, target="English checkbox"),
+        ExpectedStep(index=2, action=ActionType.click, target="Join button"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Join button", timestamp_ms=1000),
+        _obs(2, ActionType.click, "English checkbox", timestamp_ms=2000),
+    ])
+
+    result = align(expected, observed)
+
+    assert [verdict.passed for verdict in result.step_verdicts].count(True) == 1
+
+
+def test_align_targetless_dismiss_requires_state_transition_evidence():
+    expected = _make_expected([
+        ExpectedStep(
+            index=1,
+            action=ActionType.click,
+            target=None,
+            raw_text="Dismiss terms after reading",
+        ),
+    ])
+    observed = _make_observed([
+        ObservedAction(
+            index=1,
+            timestamp_ms=33500,
+            action=ActionType.click,
+            target="X close button on terms",
+            confidence=0.9,
+            screen_description="The terms overlay remains open.",
+        ),
+    ])
+
+    result = align(expected, observed)
+
+    assert result.step_verdicts[0].passed is False
+    assert result.step_verdicts[0].matched_observed_index is None
+    assert result.step_verdicts[0].finding_types == [FindingType.missing_action]
 
 
 def test_align_dismissal_does_not_pair_with_scroll_only_observation():
@@ -688,8 +1326,8 @@ def test_align_repeated_dismissal_clicks_do_not_reuse_close_observation():
         "expected_passes",
     ),
     [
-        (False, [1, 3, 4, None], [True, True, False, False]),
-        (True, [1, 2, 3, 4], [True, True, True, False]),
+        (False, [1, 3, None, None], [True, True, False, False]),
+        (True, [1, 2, 3, None], [True, True, True, False]),
     ],
 )
 def test_align_state_assertion_respects_temporal_order(
@@ -793,21 +1431,14 @@ def test_align_state_assertion_respects_temporal_order(
         assert dismissal_verdict.evidence_timestamp_ms == 1000
     else:
         assert dismissal_verdict.matched_observed_index == 3
-        assert assertion_verdict.matched_observed_index == 4
+        assert assertion_verdict.matched_observed_index is None
+        assert assertion_verdict.finding_types == [FindingType.missing_action]
         assert assertion_verdict.passed is False
-        assert FindingType.assertion_not_observed in assertion_verdict.finding_types
 
     language_verdict = result.step_verdicts[3]
     assert language_verdict.passed is False
-    if assertion_before_dismissal:
-        assert language_verdict.matched_observed_index == 4
-        assert set(language_verdict.finding_types) == {
-            FindingType.wrong_target,
-            FindingType.assertion_not_observed,
-        }
-    else:
-        assert language_verdict.matched_observed_index is None
-        assert language_verdict.finding_types == [FindingType.missing_action]
+    assert language_verdict.matched_observed_index is None
+    assert language_verdict.finding_types == [FindingType.missing_action]
 
 
 def test_dp_align_extra_observed_produces_gap():
@@ -843,6 +1474,30 @@ def test_classify_pair_wrong_target_when_targets_dissimilar():
     obs = _obs(1, ActionType.click, "Logout button")
     findings = _classify_pair(exp, obs)
     assert FindingType.wrong_target in findings
+
+
+def test_classify_pair_accepts_field_named_by_one_alternative_label():
+    exp = _exp(1, ActionType.type_text, "username field")
+    obs = _obs(1, ActionType.type_text, "Username or email address", input_value="raviteja.m@")
+    assert _classify_pair(exp, obs) == []
+
+
+def test_classify_pair_accepts_browser_search_bar_as_address_bar():
+    exp = _exp(1, ActionType.type_text, "browser search bar", input_value="Uber login")
+    obs = _obs(1, ActionType.type_text, "Address bar")
+    assert _classify_pair(exp, obs) == []
+
+
+def test_classify_pair_accepts_site_navigation_to_brand_domain():
+    exp = _exp(1, ActionType.navigate, "Uber website")
+    obs = _obs(1, ActionType.navigate, "uber.com/in/en/rider-home/")
+    assert _classify_pair(exp, obs) == []
+
+
+def test_classify_pair_wrong_target_for_site_navigation_to_lookalike_domain():
+    exp = _exp(1, ActionType.navigate, "Uber website")
+    obs = _obs(1, ActionType.navigate, "uber.com.example.invalid")
+    assert FindingType.wrong_target in _classify_pair(exp, obs)
 
 
 def test_classify_pair_wrong_target_when_observed_target_absent():
@@ -1328,33 +1983,121 @@ def test_align_page_assertion_requires_evidence_not_screen_tokens():
         ),
     ])
 
-    assert not _screen_description_supports_assertion(
-        expected.steps[2], observed.actions[2]
-    )
     result = align(expected, observed)
 
     step = result.step_verdicts[2]
     assert step.passed is False
-    assert FindingType.assertion_not_observed in step.finding_types
+    assert step.matched_observed_index is None
+    assert step.finding_types == [FindingType.missing_action]
 
 
-def test_screen_description_support_is_deprecated_noop():
-    expected = _exp(
-        1,
-        ActionType.assert_visible,
-        "Account settings page",
-        assertion="the Account settings page is displayed.",
-    )
-    observed = ObservedAction(
-        index=1,
-        timestamp_ms=1000,
-        action=ActionType.navigate,
-        target="example.invalid/settings",
-        confidence=0.95,
-        screen_description="Account settings page is loaded.",
-    )
+def _sign_in_page_flow() -> tuple[ExpectedTrace, ObservedTrace]:
+    expected = _make_expected([
+        _exp(1, ActionType.click, "Sign in button"),
+        _exp(
+            2,
+            ActionType.assert_visible,
+            "GitHub sign-in page",
+            assertion="the GitHub sign-in page is displayed",
+        ),
+        _exp(3, ActionType.type_text, "Password field"),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.click, "Sign in", timestamp_ms=1000),
+        _obs(
+            2,
+            ActionType.navigate,
+            "github.com/login",
+            timestamp_ms=2000,
+            evidence=AssertionEvidence(
+                description="Sign in heading", visible_text="Sign in to GitHub"
+            ),
+        ),
+        _obs(3, ActionType.type_text, "Password", timestamp_ms=3000),
+    ])
+    return expected, observed
 
-    assert not _screen_description_supports_assertion(expected, observed)
+
+def test_align_page_assertion_recovers_navigation_with_identity_visible_text():
+    expected, observed = _sign_in_page_flow()
+    step = align(expected, observed).step_verdicts[1]
+    assert step.passed is True
+    assert step.matched_observed_index == 2
+
+
+def _dashboard_flow(navigate_target: str, *, heading: bool = True) -> ObservedTrace:
+    actions = [
+        _obs(1, ActionType.click, "Sign in", timestamp_ms=1000),
+        _obs(2, ActionType.navigate, navigate_target, timestamp_ms=2000),
+    ]
+    if heading:
+        actions.append(_obs(
+            3,
+            ActionType.assert_visible,
+            "Dashboard",
+            timestamp_ms=2000,
+            evidence=AssertionEvidence(
+                description="Home page after sign-in", visible_text="Dashboard"
+            ),
+        ))
+    return _make_observed(actions)
+
+
+def _dashboard_expected() -> ExpectedTrace:
+    return _make_expected([
+        _exp(1, ActionType.click, "Sign in button"),
+        _exp(
+            2,
+            ActionType.assert_visible,
+            "GitHub dashboard",
+            assertion="It should display GitHub dashboard",
+        ),
+    ])
+
+
+def test_align_dashboard_assertion_uses_identity_of_opening_navigation():
+    step = align(_dashboard_expected(), _dashboard_flow("github.com")).step_verdicts[1]
+    assert step.passed is True
+    assert step.matched_observed_index == 3
+
+
+def test_align_dashboard_assertion_rejects_signed_out_homepage_navigation():
+    observed = _dashboard_flow("github.com", heading=False)
+    step = align(_dashboard_expected(), observed).step_verdicts[1]
+    assert step.passed is False
+
+
+def test_align_dashboard_assertion_rejects_opening_navigation_to_another_site():
+    step = align(_dashboard_expected(), _dashboard_flow("gitlab.com")).step_verdicts[1]
+    assert step.passed is False
+
+
+def test_align_dashboard_identity_is_not_borrowed_from_before_previous_step():
+    expected = _make_expected([
+        _exp(1, ActionType.navigate, "GitHub site"),
+        _exp(2, ActionType.click, "Settings link"),
+        _exp(
+            3,
+            ActionType.assert_visible,
+            "GitHub dashboard",
+            assertion="It should display GitHub dashboard",
+        ),
+    ])
+    observed = _make_observed([
+        _obs(1, ActionType.navigate, "github.com", timestamp_ms=1000),
+        _obs(2, ActionType.click, "Settings link", timestamp_ms=2000),
+        _obs(
+            3,
+            ActionType.assert_visible,
+            "Dashboard",
+            timestamp_ms=3000,
+            evidence=AssertionEvidence(
+                description="Panel heading", visible_text="Dashboard"
+            ),
+        ),
+    ])
+    step = align(expected, observed).step_verdicts[2]
+    assert step.passed is False
 
 
 def test_align_assertion_passes_with_visible_text_evidence():

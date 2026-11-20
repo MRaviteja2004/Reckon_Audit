@@ -34,8 +34,9 @@ from reckon.latency import (
 )
 from reckon.parser import make_openai_client
 from reckon.retry import RetryCallback, call_with_retry
-from reckon.equivalence.citations import bind_observed_interaction
 from reckon.schema import ActionType, AssertionEvidence, ObservedAction, ObservedTrace
+from reckon.stage2.interaction_binding import InteractionOutcome, bind_reported_interaction
+from reckon.stage2.interaction_contract import ReportedInteraction, interaction_prompt_section
 
 logger = logging.getLogger(__name__)
 
@@ -76,13 +77,10 @@ separate observations, and folding the outcome into the click loses it.
 - Do not open with a navigate action invented to describe the first frame. Report a \
 navigate only when you can see the page actually change to a new one.
 - Set confidence to reflect how certain you are the action occurred as described.
-- Optional interaction: operation, kind, kind_text, name, product, instance, and \
-value. Cite those strings from exactly one of target, input_value, or visible_text. \
-Do not cite screen_description. Leave interaction empty when you cannot.\
-"""
+""" + interaction_prompt_section()
 
 
-class _ExtractedAction(BaseModel):
+class _ExtractedAction(ReportedInteraction):
     """One action as reported by the model, positioned by frame rather than by time."""
 
     frame_index: int = Field(
@@ -101,15 +99,6 @@ class _ExtractedAction(BaseModel):
         None,
         description="Brief description of the screen state in this frame",
     )
-    interaction_operation: str | None = None
-    interaction_operation_text: str | None = None
-    interaction_kind: str | None = None
-    interaction_kind_text: str | None = None
-    interaction_name: str | None = None
-    interaction_product: str | None = None
-    interaction_instance: str | None = None
-    interaction_value: str | None = None
-    interaction_surface: str | None = None
 
 
 class _ExtractedActions(BaseModel):
@@ -169,33 +158,17 @@ def _resolve_frame_index(frame_index: int, frame_count: int) -> int:
     return max(1, min(frame_index, frame_count))
 
 
-def _interaction_for_report(reported: _ExtractedAction, frame_index: int):
-    """Bind a reported interaction to one stored surface, or drop it."""
-    if not reported.interaction_operation or not reported.interaction_kind or not reported.interaction_kind_text:
-        return None
-    surface = reported.interaction_surface
-    if surface == "target":
-        text = reported.target
-    elif surface == "input_value":
-        text = reported.input_value
-    elif surface == "visible_text" and reported.assertion_evidence is not None:
-        text = reported.assertion_evidence.visible_text
-    else:
-        return None
-    if not text:
-        return None
-    return bind_observed_interaction(
-        surface_text=text,
-        surface=surface,
-        operation=reported.interaction_operation,
-        operation_text=reported.interaction_operation_text,
-        kind=reported.interaction_kind,
-        kind_text=reported.interaction_kind_text,
-        cited_frame_index=frame_index,
-        name=reported.interaction_name,
-        product=reported.interaction_product,
-        instance=reported.interaction_instance,
-        value=reported.interaction_value,
+def _bound_interaction(reported: _ExtractedAction, frame_index: int) -> InteractionOutcome:
+    evidence = reported.assertion_evidence
+    return bind_reported_interaction(
+        reported,
+        action=reported.action,
+        surfaces={
+            "target": reported.target,
+            "input_value": reported.input_value,
+            "visible_text": None if evidence is None else evidence.visible_text,
+        },
+        frame_index=frame_index,
     )
 
 
@@ -258,6 +231,7 @@ def extract_window(
     actions = []
     for index, reported in enumerate(extracted.actions, start=1):
         frame_index = _resolve_frame_index(reported.frame_index, len(sample_timestamps))
+        bound = _bound_interaction(reported, frame_index)
         actions.append(ObservedAction(
             index=index,
             timestamp_ms=sample_timestamps[frame_index - 1] - clip_offset_ms,
@@ -267,7 +241,8 @@ def extract_window(
             assertion_evidence=reported.assertion_evidence,
             confidence=reported.confidence,
             screen_description=reported.screen_description,
-            interaction=_interaction_for_report(reported, frame_index),
+            interaction=bound.interaction,
+            interaction_diagnostic=bound.diagnostic,
         ))
 
     if latency is not None:

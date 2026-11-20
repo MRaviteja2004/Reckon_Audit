@@ -75,6 +75,10 @@ All configuration lives in `.env`. Copy `.env.example` to get started — it doc
 | `OPENAI_MODEL` | No | Model for Stage 1 scenario parsing. Default: `claude-opus-5-5` |
 | `EXTRACTION_MODEL` | No | Vision-capable model for Stage 2 frame extraction. Default: `claude-opus-5-5` |
 | `CROSSCHECK_MODEL` | No | Vision-capable model for the Stage 4 cross-check. Default: `claude-opus-5-5` |
+| `RECKON_RECORDINGS_DIR` | No | Folder where the Streamlit app (and `run_pipeline.py --save`) saves recordings and evaluations. Default: `recordings` |
+| `RECKON_VIDEO_RETENTION` | No | `keep` stores the uploaded video; `discard` keeps only its checksum plus decoded evidence stills. Default: `keep` |
+| `RECKON_CAPTURE_MODEL_IO` | No | `full` saves Stage 3/4 prompt text and responses with each evaluation; `hashes` saves hashes only (see *Model call capture*). Credentials are redacted in both. Default: `full` |
+| `RECKON_STALE_RUN_SECONDS` | No | Age after which a `running` evaluation is marked `interrupted`. Default: `21600` |
 
 > `.env` is gitignored. Never commit it.
 
@@ -152,7 +156,49 @@ source .venv/bin/activate
 streamlit run app.py
 ```
 
-Upload a recording, paste the expected scenario (free text, numbered steps, or Gherkin), optionally tick **Run cross-check pass (second model)**, and click **Run Audit**. The app runs the full Stage 1 → 4 pipeline with a live status panel, then renders the verdict banner, fidelity score, findings (sorted by severity, each with its video timestamp), cross-check verdicts, and per-step verdicts. A collapsible **Pipeline Debug Output** panel shows the raw JSON from every stage — copy it to diagnose a run.
+Upload a recording, paste the expected scenario (free text, numbered steps, or Gherkin), optionally tick **Run cross-check pass (second model)**, and click **Run Full Pipeline**. The app runs the full Stage 1 → 4 pipeline with a live status panel, then renders the verdict banner, fidelity score, findings (sorted by severity, each with its video timestamp), cross-check verdicts, and per-step verdicts. A collapsible **Pipeline Debug Output** panel shows the raw JSON from every stage — copy it to diagnose a run.
+
+### Saved recordings
+
+Every run is saved under `RECKON_RECORDINGS_DIR`, one folder per recording, named from the scenario title (or the video filename):
+
+```
+recordings/TC_7_Submit_form/
+  recording.json        title, scenario text, video checksum
+  recording.mp4         the uploaded video (absent with RECKON_VIDEO_RETENTION=discard)
+  stage-1.json          expected trace + run metadata
+  stage-2.json          observed trace (extraction v1) + run metadata
+  stage-2.v2.json       a Stage 2 retry; earlier versions are kept
+  stage2-attempts/…json every Stage 2 attempt: status, timings, video + Stage 1 checksums, error
+  stage-2c.json         frozen Stage 2C for Stage 2 v1: frame manifest, raw batch, validation decisions
+  stage-2c.v2.json      frozen Stage 2C for Stage 2 v2
+  evidence/…/F1.jpg     decoded evidence stills (discard retention only)
+  stage3/0001.json      Stage 3 evaluations, one file per run, never overwritten
+  stage4/0001.json      Stage 4 cross-checks, each linked to a Stage 3 version + SHA-256
+```
+
+Each artifact records the models, configuration, Git commit, timings and status of the run that made it. The **Saved Recordings** panel lets you pick a recording and:
+
+- **Retry Stage 2** extracts again from the saved video and saves the next Stage 2 version. Stage 1 isn't re-run. Every attempt is recorded in `stage2-attempts/`; a failed or interrupted attempt keeps its error but saves no observed trace, and earlier versions are untouched. Failed attempts are listed under **Stage 2 attempts**.
+- **Run Stage 3** re-runs alignment and the evidence-aware review on the selected Stage 2 version. Stage 2C for that version is replayed when frozen, so the frame search isn't repeated; the first Stage 2C model answer is frozen.
+- **Run Stage 4** cross-checks the selected Stage 3 evaluation, on the Stage 2 version that evaluation used.
+- **Show Stage 3 / Stage 4 result** re-displays any historical evaluation, with the usual JSON download.
+
+Every JSON file carries its own checksum in a top-level `integrity` field: the SHA-256 of its canonical JSON (keys sorted, no whitespace) with `integrity` removed. Reformatting a file doesn't change it; changing any value does. `recording.json` is re-checksummed whenever it's updated. Before Stage 3 or Stage 4 runs, every input is verified, the video is checked against `recording.json`, and Stage 4 also requires Stage 1 and Stage 2 to match the checksums its Stage 3 evaluation recorded. A modified file stops the run.
+
+Recordings saved before embedded checksums still load: a file without an `integrity` field is checked against its old `.sha256` sidecar, and files with neither are used but listed as unverified in the evaluation. No migration step is needed. Files that are rewritten (`recording.json`, and runs that finish or are recovered) gain an embedded checksum on their next write; finished evaluations and stage artifacts are never rewritten, so they keep their sidecar. New saves write no `.sha256` files.
+
+**Why two Stage 3 runs can differ.** Only Stage 2C is replayed. The episode, assist and evidence-review calls run live each time, and Stage 2C's search targets depend on their answers. Every evaluation saves each model call: requested and served model, parameters, prompt hash and text, image hashes, response, response ID, timing and token usage. Comparing two versions' `model_calls` shows where they diverged. `stage2c_replay.unmatched_targets` lists steps the frozen batch never answered. Those steps were never searched, so they are not reported as "searched, not found": they're left out of the candidate evidence, their frame-evidence proposal is `skipped` with reason `stage2c_not_searched_frozen_replay`, and they stay eligible for Stage 4. Run a fresh Stage 2 version to search them.
+
+**What needs the video.** Stage 2 retries and Stage 4 decode frames from the original video. Stage 4 samples evenly spaced frames from a window around each target, which the saved evidence stills don't contain. With `RECKON_VIDEO_RETENTION=discard` both are refused with an explanation, and their buttons are disabled. Stage 3 runs without the video when it has saved evidence stills or a frozen Stage 2C; with none of them, the evidence-aware run is refused.
+
+**Model call capture.** `RECKON_CAPTURE_MODEL_IO=full` keeps the prompt text and parsed response of each Stage 3/4 model call in `model_calls`; `hashes` keeps only SHA-256 digests of them. Both modes hash images and system prompts rather than storing them, record only sampling parameters (`temperature`, `seed`, `max_tokens`, …), never client options, headers or keys, and redact credential values from stored text and errors: values of environment variables whose names contain TOKEN, KEY, SECRET, PASSWORD, CREDENTIAL or USSO, `Bearer` values, `sk-…` keys and `api_key=` assignments. `hashes` only covers `model_calls`: the evaluation result and the frozen `stage-2c.json` raw batch are model output needed to audit and replay the run, and are always saved.
+
+**Concurrent use.** Updates that read and rewrite a recording's files (recording the video checksum, finishing a run, stale-run recovery) take a per-recording lock (`.lock`, `flock`). If another operation holds it for more than 10 seconds, the action fails with "Recording … is busy" rather than overwriting it. New versions use exclusive file creation, so simultaneous runs get distinct version numbers.
+
+**Interrupted runs.** Stopping the app, or a rerun mid-stage, records the run as `interrupted` with the model calls made so far. A `running` record (an evaluation or a Stage 2 attempt) whose process has gone, or that's older than `RECKON_STALE_RUN_SECONDS`, is marked `interrupted` when the recording is opened. If a run's final write fails (for example the recording stays busy), its last record is kept as `stage3/NNNN.unsaved.json` (or `stage4/…`), and recovery copies its model calls into the interrupted record. Version numbers are never reused.
+
+`scripts/run_pipeline.py --save` writes the same layout (deterministic Stage 3).
 
 ---
 

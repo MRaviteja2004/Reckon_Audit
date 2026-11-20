@@ -41,30 +41,6 @@ class CaseTruth(BaseModel):
     )
 
 
-class AssistCaseTruth(BaseModel):
-    """Ground truth for Stage 3 assist evaluation cases under eval/aligner_assist/."""
-
-    case_id: str
-    notes: str = ""
-    baseline_polarity: Literal["faithful", "broken"]
-    assisted_polarity: Literal["faithful", "broken"]
-    baseline_steps: list[StepTruth]
-    assisted_steps: list[StepTruth]
-    baseline_case_findings: list[FindingType] = Field(default_factory=list)
-    assisted_case_findings: list[FindingType] = Field(default_factory=list)
-    assist_kind: Literal["wrong_target", "delayed_assertion", "none"]
-    candidate_expected: bool
-    llm_required: bool
-    expected_resolution: Literal["accept", "reject", "no_candidate"]
-    scripted_answer: str | None = Field(
-        default=None,
-        description="Mock Claude answer for offline scripted mode when llm_required",
-    )
-    scripted_supporting_event_id: str | None = None
-    scripted_confidence: float = Field(default=0.95, ge=0.0, le=1.0)
-    improvement_class: Literal["deterministic_delayed", "llm_semantic", "none"] = "none"
-
-
 class EvidenceRoleLabel(BaseModel):
     """Scripted role assignment for one observed event in evidence-aware eval."""
 

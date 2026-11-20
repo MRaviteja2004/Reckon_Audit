@@ -4,7 +4,6 @@ import re
 
 from rapidfuzz import fuzz
 
-from reckon.episodes import episode_containing_index
 from reckon.schema import (
     AuditResult,
     ExpectedStep,
@@ -15,11 +14,10 @@ from reckon.schema import (
     ScreenEpisode,
 )
 from reckon.episode_interaction import INTERACTION_ACTIONS, is_passive_observation
+from reckon.page_context import opening_navigation_target
 from reckon.tolerance import (
     ASSERTION_ACTIONS,
     FUZZY_THRESHOLD,
-    _contains_assertion,
-    _introduces_negation,
     actions_compatible,
     assertion_satisfied,
 )
@@ -524,28 +522,23 @@ def episode_has_negative_invariant(
     return False
 
 
-def text_satisfies_assertion(assertion: str, text: str) -> bool:
-    if not text.strip():
-        return False
-    if _introduces_negation(assertion, text):
-        return False
-    return _contains_assertion(assertion, text)
-
-
 def _action_satisfies_assertion(
     assertion: str,
     action: ObservedAction,
     *,
     expected_target: str | None = None,
+    context_target: str | None = None,
 ) -> bool:
-    """Accept structured assertion_evidence, or screen-landing navigate identity.
+    """Accept structured assertion_evidence, or screen identity in visible text.
 
-    Naked screen_description alone is never enough. ``assertion_satisfied`` may
-    confirm a land-on-screen claim from a navigate target (e.g. ``…/login``)
-    when Stage 2 omitted assertion_evidence; those remain eligible here.
+    Naked screen_description alone is never enough. ``context_target`` is the URL
+    of the navigation that opened the screen, inside the same episode.
     """
     if not assertion_satisfied(
-        assertion, action, expected_target=expected_target
+        assertion,
+        action,
+        expected_target=expected_target,
+        context_target=context_target,
     ):
         return False
     evidence = action.assertion_evidence
@@ -583,7 +576,12 @@ def best_proof_action(
         action
         for action in in_episode
         if _action_satisfies_assertion(
-            assertion, action, expected_target=step.target
+            assertion,
+            action,
+            expected_target=step.target,
+            context_target=opening_navigation_target(
+                in_episode, action, floor_ms=episode.start_ms
+            ),
         )
         and (not require_target or delayed_toast_target_relevant(step, action))
     ]

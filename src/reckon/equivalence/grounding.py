@@ -2,6 +2,10 @@
 
 from reckon.schema import SlotCitation
 
+# Markdown emphasis and quotation marks carry no meaning in a scenario sentence, so they
+# neither change what a citation refers to nor break adjacency between two citations.
+IGNORED_CITATION_CHARACTERS = frozenset("*`\"'\u201c\u201d\u2018\u2019")
+
 
 def citation_matches(source: str, citation: SlotCitation) -> bool:
     """True when the citation is an exact exclusive-end slice of ``source``."""
@@ -15,14 +19,14 @@ def citation_inside(citation: SlotCitation, start: int, end: int) -> bool:
 
 
 def slices_adjacent(source: str, left: SlotCitation, right: SlotCitation) -> bool:
-    """True when only whitespace separates the slices, in either order."""
+    """True when only whitespace and markup separate the slices, in either order."""
     if left.end <= right.start:
         gap = source[left.end:right.start]
     elif right.end <= left.start:
         gap = source[right.end:left.start]
     else:
         return False
-    return gap.strip() == ""
+    return all(char.isspace() or char in IGNORED_CITATION_CHARACTERS for char in gap)
 
 
 def locate_unique(source: str, text: str, start: int, end: int) -> SlotCitation | None:

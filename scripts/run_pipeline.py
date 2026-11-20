@@ -10,6 +10,9 @@ Options:
                          on-screen evidence an assertion cares about, and without this
                          pass faithful recordings draw false assertion findings.
     --out <path>         Write the final audit (or cross-check report) JSON to <path>.
+    --save               Also persist the run as a recording under RECKON_RECORDINGS_DIR,
+                         using the same store as the Streamlit app (stage-1, stage-2,
+                         Stage 3 / Stage 4 evaluations; video per RECKON_VIDEO_RETENTION).
 
 Stages:
     1. Parse the scenario into an ExpectedTrace          (OpenAI, OPENAI_MODEL)
@@ -25,6 +28,7 @@ Stage 3 needs no key.
 
 import argparse
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -42,6 +46,16 @@ from reckon.latency import (  # noqa: E402
     monotonic_ms,
 )
 from reckon.parser import parse_scenario  # noqa: E402
+from reckon.persistence import (  # noqa: E402
+    RecordingStore,
+    Stage3Mode,
+    VideoRetention,
+    build_stage1_artifact,
+    run_stage2,
+    run_stage3,
+    run_stage4,
+    utc_now,
+)
 from reckon.sampler import extract_observed_trace  # noqa: E402
 from reckon.schema import AuditResult, ExpectedTrace  # noqa: E402
 
@@ -107,6 +121,8 @@ def main() -> None:
     parser.add_argument("--no-cross-check", action="store_true",
                         help="Skip the cross-check pass (it runs by default)")
     parser.add_argument("--out", type=Path, default=None, help="Write the result JSON here")
+    parser.add_argument("--save", action="store_true",
+                        help="Persist the run as a recording (same store as the Streamlit app)")
     args = parser.parse_args()
 
     if not args.recording.exists():
@@ -118,26 +134,65 @@ def main() -> None:
 
     # ── Stage 1 ──────────────────────────────────────────────────────────────
     _log("Stage 1 — parsing scenario …")
+    stage1_started_at = utc_now()
     stage1_started = monotonic_ms()
     expected = parse_scenario(scenario_text)
     latency.stage1_ms = elapsed_ms(stage1_started)
     logger.info("stage1 duration_ms=%.1f step_count=%d", latency.stage1_ms, len(expected.steps))
     _log(f"  → {len(expected.steps)} step(s): {expected.scenario_title!r}")
 
+    store: RecordingStore | None = None
+    recording_id = ""
+    video_path = args.recording
+    if args.save:
+        store = RecordingStore.from_env()
+        recording_id = store.create_recording(
+            title=expected.scenario_title,
+            source_filename=args.recording.name,
+            scenario_text=scenario_text,
+        ).recording_id
+        store.save_stage1(
+            recording_id,
+            build_stage1_artifact(
+                expected, started_at=stage1_started_at, duration_ms=latency.stage1_ms
+            ),
+        )
+        if store.video_retention == VideoRetention.keep:
+            with args.recording.open("rb") as source:
+                video_path = store.write_video(
+                    recording_id,
+                    lambda handle: shutil.copyfileobj(source, handle),
+                    suffix=args.recording.suffix,
+                )
+        else:
+            store.record_unretained_video(recording_id, args.recording)
+        _log(f"  → saving to {store.recording_dir(recording_id)}")
+
     # ── Stage 2 ──────────────────────────────────────────────────────────────
     _log("Stage 2 — detecting screen changes and extracting observed trace …")
-    with latency_scope(latency):
-        observed = extract_observed_trace(
-            make_client(),
-            args.recording,
-            source_file=args.recording.name,
-        )
+    if store is not None:
+        observed = run_stage2(
+            store, recording_id, video_path=video_path, latency=latency
+        ).observed_trace
+    else:
+        with latency_scope(latency):
+            observed = extract_observed_trace(
+                make_client(),
+                args.recording,
+                source_file=args.recording.name,
+            )
     _log(f"  → {len(observed.actions)} observed action(s)")
 
     # ── Stage 3 ──────────────────────────────────────────────────────────────
     _log("Stage 3 — aligning …")
     stage3_started = monotonic_ms()
-    result = align(expected, observed)
+    stage3_version: int | None = None
+    if store is not None:
+        stage3 = run_stage3(store, recording_id, mode=Stage3Mode.deterministic)
+        assert stage3.result is not None
+        result, stage3_version = stage3.result, stage3.version
+    else:
+        result = align(expected, observed)
     latency.stage3_ms = elapsed_ms(stage3_started)
     logger.info(
         "stage3 duration_ms=%.1f finding_count=%d",
@@ -149,8 +204,15 @@ def main() -> None:
     # ── Stage 4 ──────────────────────────────────────────────────────────────
     if not args.no_cross_check:
         _log("Stage 4 — cross-checking assertions and low-confidence steps …")
-        with latency_scope(latency):
-            report = run_cross_check(expected, observed, result, args.recording)
+        if store is not None and stage3_version is not None:
+            stage4 = run_stage4(
+                store, recording_id, stage3_version, latency=latency, video_path=video_path
+            )
+            assert stage4.report is not None
+            report = stage4.report
+        else:
+            with latency_scope(latency):
+                report = run_cross_check(expected, observed, result, args.recording)
         for verdict in report.verdicts:
             _log(
                 f"  [{verdict.answer.value}] ({verdict.confidence:.2f}) "

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from reckon.schema import ElementKind, IntentOperation, ObjectKind
 
 TABLE_VERSION = "1"
+APPLICATION_ICON_RULE_ID = "application_icon"
 
 
 @dataclass(frozen=True)
@@ -35,7 +36,7 @@ TYPE_REALIZATIONS: tuple[TypeRealization, ...] = (
         same_kind=True,
     ),
     TypeRealization(
-        rule_id="application_icon",
+        rule_id=APPLICATION_ICON_RULE_ID,
         expected_operation=IntentOperation.traverse,
         expected_kind=ObjectKind.application,
         observed_operation=IntentOperation.activate,

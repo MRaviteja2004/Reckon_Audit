@@ -1,18 +1,28 @@
 """Predicate engine: citations, assignment, and legacy compatibility."""
 
+from unittest.mock import MagicMock
+
 import pytest
 from pydantic import ValidationError
 
 from reckon.aligner import align
 from reckon.assist import align_with_assist
-from reckon.parser import _LLMIntent, _LLMStep, _LLMTrace, _build_expected_trace
+from reckon.assist_propose import _AssistBatchResponse
 from reckon.equivalence.citations import bind_expected_intent, bind_observed_interaction
-from reckon.equivalence.engine import apply_agent_equivalence, apply_base_equivalence, evaluate
+from reckon.equivalence.engine import (
+    apply_agent_equivalence,
+    apply_base_equivalence,
+    evaluate,
+)
 from reckon.equivalence.table import TABLE_VERSION, TYPE_REALIZATIONS
+from reckon.intent_contract import ReportedIntent
+from reckon.parser import _build_expected_trace, _LLMStep, _LLMTrace
 from reckon.schema import (
     ActionType,
     AssertionEvidence,
     AuditResult,
+    CandidateEvidenceType,
+    CandidateSearchStatus,
     ElementKind,
     EquivalenceDecision,
     ExpectedActionIntent,
@@ -31,6 +41,10 @@ from reckon.schema import (
     SlotCitation,
     StepVerdict,
 )
+from reckon.stage2.interaction_binding import bind_reported_interaction
+from reckon.stage2.interaction_contract import ReportedInteraction
+from reckon.stage2c.manifest import build_frame_manifest
+from reckon.stage2c.propose import RawFrameEvidenceBatch, RawFrameEvidenceCandidate
 from reckon.tolerance import actions_compatible
 
 SCENARIO = "Open the Driver application."
@@ -351,7 +365,7 @@ def test_invalid_offsets_are_rejected():
 
 
 def test_parser_binds_citations_or_drops_the_intent():
-    intent = _LLMIntent(
+    intent = ReportedIntent(
         operation="traverse",
         operation_text="Open",
         kind="application",
@@ -885,3 +899,503 @@ def test_assist_does_not_replace_a_base_equivalence_commit():
     assert verdict.passed is True
     assert verdict.evidence_id == "O1"
     assert assisted.deterministic_result.equivalence_decisions[0].status == "committed"
+
+
+def _driver_icon(index: int = 1, timestamp_ms: int = 1000) -> ObservedAction:
+    target = "Driver icon"
+    return _obs(index, timestamp_ms, target, _interaction(
+        target, operation=IntentOperation.activate, kind=ElementKind.icon,
+        kind_text="icon", name="Driver",
+    ))
+
+
+def test_graph_commit_releases_a_failed_verdict_citation_of_the_same_observation():
+    scenario = SCENARIO
+    expected = ExpectedTrace(
+        scenario_title="t",
+        source_text=scenario,
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="Save button"),
+            _step(2, _open_intent(), target="Driver application"),
+        ],
+    )
+    audit = align(expected, ObservedTrace(source_file="r.mp4", actions=[_driver_icon()]))
+    save, opened = audit.step_verdicts
+
+    assert opened.passed is True
+    assert opened.matched_observed_index == 1
+    assert opened.evidence_id == "O1"
+    assert opened.evidence_timestamp_ms == 1000
+    assert opened.recovery_reason == "application_icon@1"
+    assert save.passed is False
+    assert save.matched_observed_index is None
+    assert save.evidence_id is None
+    assert save.evidence_timestamp_ms == 1000
+    assert save.finding_types == [FindingType.wrong_target]
+    wrong_target = next(
+        finding for finding in audit.findings if finding.type == FindingType.wrong_target
+    )
+    assert wrong_target.expected_step_index == 1
+    assert wrong_target.observed_action_index is None
+    assert wrong_target.evidence_timestamp_ms == 1000
+    assert audit.equivalence_decisions[0].status == "committed"
+    assert audit.equivalence_decisions[0].observed_index == 1
+
+
+def test_failed_citation_of_an_unclaimed_observation_survives_a_graph_commit():
+    scenario = SCENARIO
+    finding = Finding(
+        type=FindingType.wrong_target,
+        severity=FindingSeverity.advisory,
+        expected_step_index=1,
+        observed_action_index=2,
+        evidence_timestamp_ms=2000,
+        description="Step 1 was paired with the Delete button.",
+    )
+    audit = AuditResult(
+        fidelity_score=0.0,
+        findings=[
+            finding,
+            Finding(
+                type=FindingType.missing_action,
+                severity=FindingSeverity.advisory,
+                expected_step_index=2,
+                description="missing",
+            ),
+        ],
+        step_verdicts=[
+            StepVerdict(
+                expected_step_index=1,
+                passed=False,
+                matched_observed_index=2,
+                evidence_timestamp_ms=2000,
+                finding_types=[FindingType.wrong_target],
+                evidence_id="O2",
+                explanation="Diagnostic pair only.",
+            ),
+            StepVerdict(
+                expected_step_index=2,
+                passed=False,
+                finding_types=[FindingType.missing_action],
+            ),
+        ],
+    )
+    expected = ExpectedTrace(
+        scenario_title="t",
+        source_text=scenario,
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="Save button"),
+            _step(2, _open_intent(), target="Driver application"),
+        ],
+    )
+    observed = ObservedTrace(source_file="r.mp4", actions=[
+        _driver_icon(),
+        ObservedAction(
+            index=2, timestamp_ms=2000, action=ActionType.click,
+            target="Delete button", confidence=0.4,
+        ),
+    ])
+
+    result = apply_base_equivalence(expected, observed, audit, scenario_text=scenario)
+    failed = result.step_verdicts[0]
+    opened = result.step_verdicts[1]
+
+    assert opened.passed is True
+    assert opened.matched_observed_index == 1
+    assert failed.passed is False
+    assert failed.matched_observed_index == 2
+    assert failed.evidence_id == "O2"
+    assert failed.evidence_timestamp_ms == 2000
+    assert failed.explanation == "Diagnostic pair only."
+    assert failed.finding_types == [FindingType.wrong_target]
+    assert result.findings[0] is finding
+
+
+def test_graph_matches_do_not_give_one_observation_to_two_passed_steps():
+    first = "Open the Driver application."
+    second = "Activate the Save control."
+    scenario = f"{first} {second}"
+    save_intent = _intent(
+        scenario,
+        operation=IntentOperation.activate,
+        operation_text="Activate",
+        kind=ObjectKind.control,
+        kind_text="control",
+        name="Save",
+        sentence=(len(first) + 1, len(scenario)),
+    )
+    expected = ExpectedTrace(
+        scenario_title="t",
+        source_text=scenario,
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="Quarterly invoice link"),
+            _step(2, _open_intent(scenario), target="Driver application"),
+            _step(3, save_intent, target="Save control"),
+        ],
+    )
+    save_target = "Save button"
+    observed = ObservedTrace(source_file="r.mp4", actions=[
+        _driver_icon(),
+        _obs(2, 2000, save_target, _interaction(
+            save_target, operation=IntentOperation.activate, kind=ElementKind.button,
+            kind_text="button", name="Save",
+        )),
+    ])
+
+    audit = align(expected, observed)
+    refund, opened, save = audit.step_verdicts
+    claimed = [
+        verdict.matched_observed_index
+        for verdict in audit.step_verdicts
+        if verdict.passed and verdict.matched_observed_index is not None
+    ]
+
+    assert opened.passed is True and opened.matched_observed_index == 1
+    assert save.passed is True and save.matched_observed_index == 2
+    assert len(claimed) == len(set(claimed))
+    assert refund.passed is False
+    assert refund.matched_observed_index is None
+    assert refund.evidence_id is None
+    assert FindingType.wrong_target in refund.finding_types
+
+
+def test_ordinary_alignment_without_intent_keeps_its_citations():
+    expected = ExpectedTrace(
+        scenario_title="Languages",
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="English checkbox"),
+            ExpectedStep(index=2, action=ActionType.click, target="Spanish checkbox"),
+        ],
+    )
+    observed = ObservedTrace(source_file="languages.mp4", actions=[
+        ObservedAction(
+            index=1, timestamp_ms=100, action=ActionType.click,
+            target="Spanish checkbox", confidence=0.9,
+        ),
+        ObservedAction(
+            index=2, timestamp_ms=200, action=ActionType.click,
+            target="English checkbox", confidence=0.9,
+        ),
+    ])
+    audit = align(expected, observed)
+
+    assert audit.equivalence_decisions == []
+    assert audit.step_verdicts[0].matched_observed_index == 2
+    assert audit.step_verdicts[1].matched_observed_index is None
+    assert audit.step_verdicts[1].finding_types == [FindingType.wrong_target]
+
+
+def test_stage2c_frame_recovery_does_not_claim_an_observation():
+    client = MagicMock()
+    client.chat.completions.create.return_value = _AssistBatchResponse(decisions=[])
+    expected = ExpectedTrace(
+        scenario_title="Offer",
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="English checkbox"),
+            ExpectedStep(
+                index=2, action=ActionType.assert_text, target="heading",
+                assertion="Choose your guarantee",
+            ),
+        ],
+    )
+    observed = ObservedTrace(source_file="offer.mp4", actions=[
+        ObservedAction(
+            index=1, timestamp_ms=1000, action=ActionType.click,
+            target="Spanish checkbox", confidence=0.9,
+        ),
+        ObservedAction(
+            index=2, timestamp_ms=2000, action=ActionType.assert_text, target="home map",
+            confidence=0.9,
+            assertion_evidence=AssertionEvidence(description="Map", visible_text="Home map"),
+        ),
+    ])
+    assisted = align_with_assist(
+        expected,
+        observed,
+        openai_client=client,
+        frame_evidence=True,
+        frame_manifest=build_frame_manifest([1000, 8000]),
+        stage2c_raw_batch=RawFrameEvidenceBatch(candidates=[
+            RawFrameEvidenceCandidate(
+                expected_step_id="E2",
+                frame_ids=["F2"],
+                evidence_type=CandidateEvidenceType.ASSERTION_OUTCOME,
+                observed_description="model prose is not the evidence",
+                visible_text=["Choose your guarantee"],
+                confidence=0.95,
+                search_status=CandidateSearchStatus.candidate_found,
+            ),
+        ]),
+    )
+    click, assertion = assisted.result.step_verdicts
+
+    assert click.passed is False
+    assert click.matched_observed_index == 1
+    assert assertion.passed is True
+    assert assertion.matched_observed_index is None
+    assert assertion.evidence_id == "F2"
+    assert assertion.recovery_reason == "frame_evidence"
+
+
+def test_agent_path_receives_the_corrected_base_result():
+    scenario = SCENARIO
+    expected = ExpectedTrace(
+        scenario_title="t",
+        source_text=scenario,
+        steps=[
+            ExpectedStep(index=1, action=ActionType.click, target="Save button"),
+            _step(2, _open_intent(), target="Driver application"),
+        ],
+    )
+    observed = ObservedTrace(source_file="r.mp4", actions=[_driver_icon()])
+    assisted = align_with_assist(
+        expected,
+        observed,
+        equivalence_agent_candidates={2: [1]},
+    )
+    save = assisted.deterministic_result.step_verdicts[0]
+    opened = assisted.result.step_verdicts[1]
+
+    assert assisted.deterministic_result.equivalence_decisions[0].status == "committed"
+    assert assisted.deterministic_result.equivalence_decisions[0].agent_status == (
+        "ignored_after_base_commit"
+    )
+    assert save.passed is False
+    assert save.matched_observed_index is None
+    assert save.evidence_timestamp_ms == 1000
+    assert save.finding_types == [FindingType.wrong_target]
+    assert opened.passed is True
+    assert opened.matched_observed_index == 1
+    assert opened.evidence_id == "O1"
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 intents produced by the parser reaching the engine
+# ---------------------------------------------------------------------------
+
+SIGN_IN_SCENARIO = "1. Click the **Sign in** button.\n"
+SIGN_IN_TARGET = "Sign in button"
+
+
+def _parsed_sign_in(intent: ReportedIntent | None) -> ExpectedTrace:
+    step = _LLMStep(
+        action=ActionType.click,
+        target=SIGN_IN_TARGET,
+        raw_text="Click the **Sign in** button.",
+        intent=intent,
+    )
+    return _build_expected_trace(
+        _LLMTrace(scenario_title="t", steps=[step]), scenario_text=SIGN_IN_SCENARIO
+    )
+
+
+def _sign_in_reported(**overrides: str) -> ReportedIntent:
+    fields = {
+        "operation": "activate",
+        "operation_text": "Click",
+        "kind": "button",
+        "kind_text": "button",
+        "name": "Sign in",
+    }
+    fields.update(overrides)
+    return ReportedIntent(**fields)
+
+
+def _button_observation(name: str, *, with_interaction: bool = True) -> ObservedTrace:
+    target = f"{name} button"
+    interaction = _interaction(
+        target,
+        operation=IntentOperation.activate,
+        kind=ElementKind.button,
+        kind_text="button",
+        name=name,
+    )
+    return ObservedTrace(
+        source_file="r.mp4",
+        actions=[_obs(1, 1000, target, interaction if with_interaction else None)],
+    )
+
+
+def _apply_base(trace: ExpectedTrace, observed: ObservedTrace) -> AuditResult:
+    return apply_base_equivalence(
+        trace,
+        observed,
+        _failed_audit(trace.steps, observed.actions),
+        scenario_text=SIGN_IN_SCENARIO,
+    )
+
+
+def test_parsed_intent_reaches_the_engine_and_commits_on_observed_evidence():
+    trace = _parsed_sign_in(_sign_in_reported())
+
+    result = _apply_base(trace, _button_observation("Sign in"))
+
+    assert (result.equivalence_decisions[0].status, result.step_verdicts[0].passed) == (
+        "committed", True,
+    )
+
+
+def test_parsed_intent_with_capitalised_operation_reaches_the_engine():
+    trace = _parsed_sign_in(_sign_in_reported(operation="Activate", kind="Button"))
+
+    result = _apply_base(trace, _button_observation("Sign in"))
+
+    assert result.step_verdicts[0].passed is True
+
+
+def test_parsed_intent_reaches_the_engine_for_evaluation():
+    trace = _parsed_sign_in(_sign_in_reported())
+    observation = _button_observation("Sign in").actions[0]
+
+    match = evaluate(
+        trace.steps[0], observation, scenario_text=SIGN_IN_SCENARIO,
+        fence=(None, None), claimed=set(),
+    )
+
+    assert getattr(match, "evidence_id", None) == "O1"
+
+
+def test_valid_intent_alone_does_not_pass_a_step_without_observed_interaction():
+    trace = _parsed_sign_in(_sign_in_reported())
+
+    result = _apply_base(trace, _button_observation("Sign in", with_interaction=False))
+
+    assert result.step_verdicts[0].passed is False
+
+
+def test_valid_intent_alone_does_not_pass_a_step_observed_on_another_control():
+    trace = _parsed_sign_in(_sign_in_reported())
+
+    result = _apply_base(trace, _button_observation("Log out"))
+
+    assert result.step_verdicts[0].passed is False
+
+
+def test_valid_intent_alone_does_not_pass_a_step_with_no_observed_action():
+    trace = _parsed_sign_in(_sign_in_reported())
+    nothing = ObservedTrace(source_file="r.mp4", actions=[])
+
+    result = align(trace, nothing)
+
+    assert result.step_verdicts[0].passed is False
+
+
+def test_rejected_intent_never_creates_a_pass():
+    trace = _parsed_sign_in(_sign_in_reported(kind="website"))
+    audit = _failed_audit(trace.steps, [])
+
+    result = apply_base_equivalence(
+        trace, _button_observation("Sign in"), audit, scenario_text=SIGN_IN_SCENARIO
+    )
+
+    assert (trace.steps[0].action_intent, result.step_verdicts[0].passed) == (None, False)
+
+
+def test_missing_intent_never_creates_a_pass():
+    trace = _parsed_sign_in(None)
+    audit = _failed_audit(trace.steps, [])
+
+    result = apply_base_equivalence(
+        trace, _button_observation("Sign in"), audit, scenario_text=SIGN_IN_SCENARIO
+    )
+
+    assert (trace.steps[0].action_intent, result.step_verdicts[0].passed) == (None, False)
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 interactions bound by the extractor reaching the engine
+# ---------------------------------------------------------------------------
+
+CLICK_SCENARIO = "Click the Sign in button."
+
+
+def _click_step() -> ExpectedStep:
+    intent = bind_expected_intent(
+        CLICK_SCENARIO,
+        sentence_start=0,
+        sentence_end=len(CLICK_SCENARIO),
+        operation="activate",
+        operation_text="Click",
+        kind="button",
+        kind_text="button",
+        name="Sign in",
+    )
+    return ExpectedStep(index=1, action=ActionType.click, target="Sign in button", action_intent=intent)
+
+
+def _extracted(target: str, action: ActionType = ActionType.click, **fields: str) -> ObservedAction:
+    reported = {
+        "operation": "activate",
+        "kind": "button",
+        "kind_text": "button",
+        "surface": "target",
+    }
+    reported.update(fields)
+    outcome = bind_reported_interaction(
+        ReportedInteraction(**{f"interaction_{k}": v for k, v in reported.items()}),
+        action=action,
+        surfaces={"target": target, "input_value": None, "visible_text": None},
+        frame_index=1,
+    )
+    return ObservedAction(
+        index=1,
+        timestamp_ms=1000,
+        action=action,
+        target=target,
+        confidence=0.9,
+        interaction=outcome.interaction,
+        interaction_diagnostic=outcome.diagnostic,
+    )
+
+
+def _committed(observation: ObservedAction) -> bool:
+    step = _click_step()
+    trace = ExpectedTrace(scenario_title="t", source_text=CLICK_SCENARIO, steps=[step])
+    observed = ObservedTrace(source_file="r.mp4", actions=[observation])
+    result = apply_base_equivalence(
+        trace, observed, _failed_audit([step], []), scenario_text=CLICK_SCENARIO
+    )
+    return result.step_verdicts[0].passed
+
+
+def test_stage1_intent_commits_on_a_grounded_stage2_interaction():
+    assert _committed(_extracted("Sign in button", name="Sign in")) is True
+
+
+def test_stage1_intent_commits_on_a_stage2_interaction_with_normalised_casing():
+    assert _committed(_extracted("Sign in button", name="Sign in", operation="Activate", kind="Button"))
+
+
+def test_stage1_intent_rejects_a_stage2_interaction_on_another_control():
+    assert _committed(_extracted("Log out button", name="Log out")) is False
+
+
+def test_stage1_intent_rejects_a_stage2_interaction_of_an_incompatible_kind():
+    assert _committed(_extracted("Sign in link", name="Sign in", kind="link", kind_text="link")) is False
+
+
+def test_stage1_intent_rejects_a_stage2_dismissal_of_the_same_control():
+    assert _committed(_extracted("Sign in button", name="Sign in", operation="dismiss")) is False
+
+
+def test_rejected_stage2_interaction_never_creates_a_pass():
+    observation = _extracted("Sign in", name="Sign in")
+
+    assert observation.interaction is None
+    assert _committed(observation) is False
+
+
+def test_stage2_interaction_contradicting_its_action_never_creates_a_pass():
+    observation = _extracted("Sign in button", ActionType.hover, name="Sign in")
+
+    assert observation.interaction is None
+    assert _committed(observation) is False
+
+
+def test_omitted_stage2_interaction_never_creates_a_pass():
+    observation = ObservedAction(
+        index=1, timestamp_ms=1000, action=ActionType.click, target="Sign in button",
+        confidence=0.9,
+    )
+
+    assert _committed(observation) is False

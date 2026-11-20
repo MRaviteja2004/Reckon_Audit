@@ -2,6 +2,23 @@ import re
 
 from rapidfuzz import fuzz
 
+from reckon.assertion_pairing import assertion_pair_grounded
+from reckon.control_semantics import (
+    CLOSE_CONTROL_RE,
+    DISMISS_ACTION_RE,
+    choice_identity_conflicts,
+    choice_pair_supported,
+    choice_pair_supports_step,
+    is_targetless_dismiss,
+    state_contradicts_instruction,
+    targetless_dismissal_supported,
+)
+from reckon.episode_interaction import (
+    apply_deterministic_auth_cta_recovery,
+    apply_deterministic_typeahead_recovery,
+)
+from reckon.ownership import with_consistent_citations
+from reckon.page_context import opening_navigation_target
 from reckon.schema import (
     ActionType,
     AuditResult,
@@ -13,10 +30,7 @@ from reckon.schema import (
     ObservedTrace,
     StepVerdict,
 )
-from reckon.episode_interaction import (
-    apply_deterministic_auth_cta_recovery,
-    apply_deterministic_typeahead_recovery,
-)
+from reckon.target_equivalence import target_exactly_equivalent
 from reckon.tolerance import (
     ASSERTION_ACTIONS,
     FUZZY_THRESHOLD,
@@ -48,12 +62,11 @@ _OPEN_ORDER_RE = re.compile(r"\bopen\s+(?:the\s+)?order\b", re.IGNORECASE)
 _ORDER_TARGET_RE = re.compile(r"^\s*order\s*#\s*(\d+)\s*$", re.IGNORECASE)
 _ORDER_ROUTE_RE = re.compile(r"(?:^|/)orders/(\d+)/?$", re.IGNORECASE)
 _ORDER_DETAILS_RE = re.compile(r"\border\s*#\s*(\d+)\b", re.IGNORECASE)
-_DISMISS_ACTION_RE = re.compile(
-    r"^\s*(?:(?:\d+[.)]|[-*•])\s+)?(?:dismiss|close)\b",
-    re.IGNORECASE,
-)
-_CLOSE_CONTROL_RE = re.compile(r"\b(?:close|dismiss)\b", re.IGNORECASE)
 _DIRECT_ASSERTION_BONUS = 0.2
+# Assertion evidence says what is on screen, not when. An interaction pair anchors the
+# order of the flow, so on a near-tie it keeps its observation rather than losing it to
+# an assertion that matches evidence from the wrong side of that interaction.
+_ASSERTION_PAIR_CEILING = 0.95
 
 # ---------------------------------------------------------------------------
 # Scoring
@@ -104,21 +117,6 @@ def _target_similarity(expected: str, observed: str) -> float:
     return 0.0
 
 
-def _screen_description_supports_assertion(
-    exp: ExpectedStep,
-    obs: ObservedAction,
-) -> bool:
-    """Deprecated pairing/confirmation heuristic — always False.
-
-    Previously, target nouns appearing in ``screen_description`` (e.g. "driver"
-    / "app" on a Studio Settings screen) could confirm an assertion without any
-    proof of the claimed outcome. Assertions must be confirmed only via
-    ``assertion_satisfied`` (evidence text) or Stage 3/4 semantic review.
-    """
-    del exp, obs
-    return False
-
-
 def _order_navigation_supports_open(
     exp: ExpectedStep,
     obs: ObservedAction,
@@ -156,8 +154,8 @@ def _dismissal_click_supports_target(
         or exp.target is None
         or exp.raw_text is None
         or obs.target is None
-        or _DISMISS_ACTION_RE.search(exp.raw_text) is None
-        or _CLOSE_CONTROL_RE.search(obs.target) is None
+        or DISMISS_ACTION_RE.search(exp.raw_text) is None
+        or CLOSE_CONTROL_RE.search(obs.target) is None
     ):
         return False
 
@@ -175,15 +173,34 @@ def _dismissal_click_supports_target(
     )
 
 
-def _action_match_score(exp: ExpectedStep, obs: ObservedAction) -> float:
+def _action_match_score(
+    exp: ExpectedStep,
+    obs: ObservedAction,
+    *,
+    observed_actions: list[ObservedAction] | None = None,
+) -> float:
     """Score 0.0–1.0 for how well exp matches obs; 0.0 when action types are incompatible."""
     order_navigation_support = _order_navigation_supports_open(exp, obs)
     dismissal_target_support = _dismissal_click_supports_target(exp, obs)
+    targetless_dismissal_support = targetless_dismissal_supported(exp, obs)
+    # A dismiss with no named control must not inherit the generic click score.
+    if is_targetless_dismiss(exp) and not targetless_dismissal_support:
+        return 0.0
+    # The recorded state is the opposite of the instruction, so this observation
+    # is not the expected event even if its labels agree.
+    if state_contradicts_instruction(exp, obs):
+        return 0.0
+    choice_support = choice_pair_supports_step(
+        exp, obs, observed_actions=observed_actions
+    )
     compatible_actions = (
         actions_compatible(exp.action, obs.action)
         or order_navigation_support
+        or choice_support
     )
     if not compatible_actions:
+        return 0.0
+    if not assertion_pair_grounded(exp, obs, observed_actions=observed_actions):
         return 0.0
 
     score = 0.4
@@ -196,7 +213,12 @@ def _action_match_score(exp: ExpectedStep, obs: ObservedAction) -> float:
         exp.assertion is not None
         and assertion_satisfied(exp.assertion, obs, expected_target=exp.target)
     )
-    if order_navigation_support or dismissal_target_support:
+    if (
+        order_navigation_support
+        or dismissal_target_support
+        or targetless_dismissal_support
+        or choice_support
+    ):
         score += 0.4
     elif exp.target is not None and obs.target is not None:
         score += 0.4 * _target_similarity(exp.target, obs.target) / 100.0
@@ -212,6 +234,8 @@ def _action_match_score(exp: ExpectedStep, obs: ObservedAction) -> float:
     elif exp.input_value is None and obs.input_value is None:
         score += 0.2
 
+    if exp.action in ASSERTION_ACTIONS:
+        return min(score, _ASSERTION_PAIR_CEILING)
     return min(score, 1.0)
 
 # ---------------------------------------------------------------------------
@@ -246,7 +270,11 @@ def _dp_align(
 
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            score = _action_match_score(expected[i - 1], observed[j - 1])
+            score = _action_match_score(
+                expected[i - 1],
+                observed[j - 1],
+                observed_actions=observed,
+            )
 
             options: list[tuple[float, int]] = []
             if score >= _MATCH_FLOOR:
@@ -332,19 +360,32 @@ def _is_complete_repeated_flow(
 # Finding classification
 # ---------------------------------------------------------------------------
 
-def _classify_pair(exp: ExpectedStep, obs: ObservedAction) -> list[FindingType]:
-    """Return finding types for a matched (exp, obs) pair; empty list means passed."""
+def _classify_pair(
+    exp: ExpectedStep,
+    obs: ObservedAction,
+    *,
+    context_target: str | None = None,
+) -> list[FindingType]:
+    """Return finding types for a matched (exp, obs) pair; empty list means passed.
+
+    ``context_target`` is the URL of the navigation that opened the observed screen.
+    """
     findings: list[FindingType] = []
 
     # Assertions require evidence text (assertion_satisfied) — never target-token
     # presence in screen_description, which caused Studio Settings–style false passes.
     assertion_confirmed = exp.assertion is not None and assertion_satisfied(
-        exp.assertion, obs, expected_target=exp.target
+        exp.assertion,
+        obs,
+        expected_target=exp.target,
+        context_target=context_target,
     )
     target_confirmed = (
         assertion_confirmed
         or _order_navigation_supports_open(exp, obs)
         or _dismissal_click_supports_target(exp, obs)
+        or choice_pair_supported(exp, obs)
+        or target_exactly_equivalent(exp, obs)
     )
 
     # Wrong target: expected a target but observed differs or is absent.
@@ -355,11 +396,13 @@ def _classify_pair(exp: ExpectedStep, obs: ObservedAction) -> list[FindingType]:
     # fails on wording rather than on fidelity. The asserted text is the substantive
     # check, and it has already passed. An assertion that was *not* confirmed still
     # reports the target mismatch, where it remains diagnostic.
-    if exp.target is not None and not target_confirmed:
-        if obs.target is None:
-            findings.append(FindingType.wrong_target)
-        elif _target_similarity(exp.target, obs.target) < FUZZY_THRESHOLD:
-            findings.append(FindingType.wrong_target)
+    # Siblings share a role word, so similarity alone cannot separate them.
+    if exp.target is not None and not target_confirmed and (
+        obs.target is None
+        or _target_similarity(exp.target, obs.target) < FUZZY_THRESHOLD
+        or choice_identity_conflicts(exp, obs)
+    ):
+        findings.append(FindingType.wrong_target)
 
     # Wrong input value: compared only when both values are observable.
     #
@@ -437,6 +480,7 @@ def align(expected: ExpectedTrace, observed: ObservedTrace) -> AuditResult:
 
     all_findings: list[Finding] = []
     step_verdicts: list[StepVerdict] = []
+    previous_pair_ms = -1
 
     matched_by_step = {
         exp.index: obs for exp, obs in pairs if exp is not None and obs is not None
@@ -503,7 +547,14 @@ def align(expected: ExpectedTrace, observed: ObservedTrace) -> AuditResult:
                 finding_types=[FindingType.missing_action],
             ))
         else:
-            pair_findings = _classify_pair(exp, obs)
+            pair_findings = _classify_pair(
+                exp,
+                obs,
+                context_target=opening_navigation_target(
+                    observed.actions, obs, floor_ms=previous_pair_ms
+                ),
+            )
+            previous_pair_ms = obs.timestamp_ms
             for ft in pair_findings:
                 all_findings.append(Finding(
                     type=ft,
@@ -556,9 +607,11 @@ def align(expected: ExpectedTrace, observed: ObservedTrace) -> AuditResult:
     recovered_later = recover_later_support(expected, observed, recovered)
     from reckon.equivalence.engine import apply_base_equivalence
 
-    return apply_base_equivalence(
-        expected,
-        observed,
-        recovered_later,
-        scenario_text=expected.source_text or "",
+    return with_consistent_citations(
+        apply_base_equivalence(
+            expected,
+            observed,
+            recovered_later,
+            scenario_text=expected.source_text or "",
+        )
     )

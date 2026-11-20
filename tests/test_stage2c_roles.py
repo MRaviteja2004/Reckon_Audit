@@ -1,6 +1,5 @@
 """Regression tests for Stage 2C semantic role exclusivity."""
 
-from reckon.aligner import align
 from reckon.schema import (
     ActionType,
     CandidateEvidenceType,
@@ -11,8 +10,6 @@ from reckon.schema import (
     Finding,
     FindingSeverity,
     FindingType,
-    ObservedAction,
-    ObservedTrace,
     StepVerdict,
     AuditResult,
     AuditVerdict,

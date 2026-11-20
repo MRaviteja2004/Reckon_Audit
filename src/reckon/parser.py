@@ -30,8 +30,24 @@ from reckon.macros.textutils import (
     onboarding_milestones_from_text as _onboarding_milestones_from_text,
     strip_step_number_prefix as _strip_step_number_prefix,
 )
-from reckon.equivalence.citations import bind_expected_intent
-from reckon.schema import ActionType, ExpectedStep, ExpectedTrace
+from reckon.intent_binding import bind_reported_intent, diagnostics_for_final_steps
+from reckon.intent_contract import (
+    INTENT_CONTRACT_VERSION,
+    ReportedIntent,
+    intent_prompt_section,
+)
+from reckon.parser_guards import (
+    drop_dangling_qualifier_steps,
+    normalize_action_and_target,
+    restore_source_order,
+)
+from reckon.schema import (
+    ActionType,
+    ExpectedStep,
+    ExpectedTrace,
+    IntentDiagnostic,
+    IntentParseReport,
+)
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "claude-opus-5-5")
 
@@ -86,6 +102,33 @@ _ASSERTION_RULES = """
   Set this for any step that checks an outcome; leave empty for steps that
   only perform an action.
 """
+_ACTION_AND_TARGET_RULES = """
+Action classification (decide from the verb the scenario uses):
+- Select / choose / pick / tick a checkbox, radio button, switch, dropdown, or \
+option → `select`.
+- Click / tap / press a button, link, icon, or other command → `click`.
+- Verify that specific text is shown → `assert_text`; that an element is present \
+→ `assert_visible`; that an element has a visual or state property (colour, \
+enabled, checked, expanded) → `assert_state`.
+
+Target resolution:
+- target is the control the user acts on. For "dismiss" or "close" the control is \
+the button, icon, or gesture the scenario names. When the scenario only names the \
+page, dialog, or content being dismissed ("Dismiss terms after reading") and no \
+control, leave target empty — never name the dismissed page as the control and \
+never invent a "Close button".
+"""
+_FREE_TEXT_ORDER_RULES = """
+Ordering and incomplete phrases:
+- Emit steps in the exact order the sentences and clauses appear in the input. \
+Never group actions together and assertions together; an action followed by its \
+assertion stays an action followed by its assertion.
+- A trailing qualifier that names a kind of content without giving it (for example \
+"... with description", "... with details") is not a step. Emit an assertion only \
+when the actual text, value, or condition is stated.
+"""
+_INTENT_RULES = intent_prompt_section()
+
 _FREE_TEXT_SYSTEM = f"""\
 You convert a test scenario description into an ordered list of structured steps.
 
@@ -140,15 +183,13 @@ onboarding flow needs every milestone.
 - A stated Hub / home landing is `assert_visible` / `assert_state` on that screen, \
 not part of a bundled `other`.
 
-Structured intent, when you can cite it from the step line:
-- operation is one of activate, enter, choose, traverse, dismiss, assert.
-- operation_text, kind_text, name, product, instance, and value must be exact \
-substrings of that step line. Leave the whole intent empty when you cannot.
-
+{_ACTION_AND_TARGET_RULES}
+{_FREE_TEXT_ORDER_RULES}
+{_INTENT_RULES}
 Select action versus selected state:
-- Imperative wording ("Select …", "Choose …", "Tap … to select …") → `select` \
-(or `click` when the scenario says tap/click), with input_value only when a \
-concrete option value is given.
+- Imperative wording ("Select …", "Choose …") on a checkbox, radio, switch, \
+dropdown, or option → `select`, with input_value only when a concrete option \
+value is given. "Tap/Click …" on a button or link is `click`.
 - State wording ("… is selected", "… are selected", "already selected") → \
 `assert_state` (or `assert_visible` when only visibility of the selection is \
 checked). Do not emit `select` for a state claim, and do not treat a preselected \
@@ -173,7 +214,7 @@ expected text here.
 {_ASSERTION_RULES}
 - preconditions: state required before the step; leave empty unless stated.
 - raw_text: the original step line, unchanged.
-
+{_ACTION_AND_TARGET_RULES}
 Rules:
 - Do not invent information that is not present in the line.
 - Preserve the input order: one output step per input line.
@@ -184,23 +225,7 @@ without checking specific text.
 - Imperative "Select/Choose …" on one line → `select`. State wording \
 ("… is selected" / "already selected") on one line → `assert_state`. Do not \
 emit `select` for a state-only claim.
-- Optional intent: operation, operation_text, kind, kind_text, name, product, \
-instance, and value. Every text must be an exact substring of the step line. \
-Leave intent empty when you cannot cite it.
-"""
-
-
-class _LLMIntent(BaseModel):
-    """Optional slot strings. Python binds them to the original scenario or drops them."""
-
-    operation: str | None = None
-    operation_text: str | None = None
-    kind: str | None = None
-    kind_text: str | None = None
-    name: str | None = None
-    product: str | None = None
-    instance: str | None = None
-    value: str | None = None
+{_INTENT_RULES}"""
 
 
 class _LLMStep(BaseModel):
@@ -224,7 +249,7 @@ class _LLMStep(BaseModel):
         None,
         description="Original scenario sentence or Gherkin line",
     )
-    intent: _LLMIntent | None = None
+    intent: ReportedIntent | None = None
 
 
 class _LLMTrace(BaseModel):
@@ -443,11 +468,18 @@ def _build_expected_trace(
     dismiss→click only; onboarding milestone expansion is performed exactly once
     by the Domain Macro registry.
     """
-    refined = _refine_llm_steps(
-        llm_trace.steps,
-        expand_onboarding=not enable_macros,
+    # Order and qualifier guards run before reindexing: intent binding below pairs
+    # each step with the scenario sentence at its index.
+    ordered = restore_source_order(
+        drop_dangling_qualifier_steps(llm_trace.steps),
+        scenario_text,
     )
+    refined = [
+        normalize_action_and_target(step)
+        for step in _refine_llm_steps(ordered, expand_onboarding=not enable_macros)
+    ]
     steps = []
+    pending_diagnostics: list[tuple[str | None, IntentDiagnostic]] = []
     for i, step in enumerate(refined, start=1):
         action = step.action
         classification_text = _strip_step_number_prefix(step.raw_text or "")
@@ -458,6 +490,13 @@ def _build_expected_trace(
         ):
             action = ActionType.click
 
+        outcome = bind_reported_intent(
+            scenario_text,
+            _sentence_span(scenario_text, step, i, len(refined)),
+            step.intent,
+            step_index=i,
+        )
+        pending_diagnostics.append((step.raw_text, outcome.diagnostic))
         steps.append(ExpectedStep(
             index=i,
             action=action,
@@ -466,7 +505,7 @@ def _build_expected_trace(
             assertion=step.assertion,
             preconditions=step.preconditions,
             raw_text=step.raw_text,
-            action_intent=_intent_for_step(scenario_text, step, i, len(refined)),
+            action_intent=outcome.intent,
         ))
 
     macros_applied = []
@@ -478,6 +517,10 @@ def _build_expected_trace(
         steps=steps,
         source_text=scenario_text or None,
         macros_applied=macros_applied,
+        intent_report=IntentParseReport(
+            contract_version=INTENT_CONTRACT_VERSION,
+            diagnostics=diagnostics_for_final_steps(pending_diagnostics, steps),
+        ),
     )
 
 
@@ -515,39 +558,6 @@ def _sentence_span(
         start = scenario_text.find(raw)
         return start, start + len(raw)
     return None
-
-
-def _intent_for_step(
-    scenario_text: str,
-    step: _LLMStep,
-    index: int,
-    count: int,
-):
-    intent = step.intent
-    if (
-        intent is None
-        or not intent.operation
-        or not intent.operation_text
-        or not intent.kind
-        or not intent.kind_text
-    ):
-        return None
-    span = _sentence_span(scenario_text, step, index, count)
-    if span is None:
-        return None
-    return bind_expected_intent(
-        scenario_text,
-        sentence_start=span[0],
-        sentence_end=span[1],
-        operation=intent.operation,
-        operation_text=intent.operation_text,
-        kind=intent.kind,
-        kind_text=intent.kind_text,
-        name=intent.name,
-        product=intent.product,
-        instance=intent.instance,
-        value=intent.value,
-    )
 
 
 def _classify_steps(

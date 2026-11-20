@@ -4,7 +4,6 @@ import pytest
 
 from reckon.parser import (
     DEFAULT_TEMPERATURE,
-    OPENAI_MODEL,
     _ASSERTION_RULES,
     _FREE_TEXT_SYSTEM,
     _GHERKIN_SYSTEM,
@@ -21,7 +20,13 @@ from reckon.parser import (
     make_openai_client,
     parse_scenario,
 )
-from reckon.schema import ActionType, ExpectedTrace
+from reckon.intent_contract import INTENT_CONTRACT_VERSION, ReportedIntent
+from reckon.schema import (
+    ActionType,
+    ExpectedTrace,
+    IntentParseStatus,
+    IntentRejectionReason,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +108,22 @@ def test_free_text_system_documents_select_versus_state():
 # ---------------------------------------------------------------------------
 # Prompt contract — Gherkin
 # ---------------------------------------------------------------------------
+
+def test_free_text_system_forbids_grouping_actions_and_assertions():
+    assert "Never group actions together and assertions together" in _FREE_TEXT_SYSTEM
+
+
+def test_free_text_system_rejects_qualifier_without_value_as_step():
+    assert 'is not a step' in _FREE_TEXT_SYSTEM
+    assert "with description" in _FREE_TEXT_SYSTEM
+
+
+def test_both_systems_define_dismiss_target_and_action_classes():
+    for system in (_FREE_TEXT_SYSTEM, _GHERKIN_SYSTEM):
+        assert "never name the dismissed page as the control" in system
+        assert "assert_state" in system
+        assert "checkbox, radio button, switch, dropdown, or option" in system
+
 
 def test_gherkin_system_forbids_splitting_or_merging_steps():
     lowered = _GHERKIN_SYSTEM.lower()
@@ -710,7 +731,7 @@ def test_parse_scenario_normalizes_imperative_dismiss_to_click():
     result = parse_scenario(scenario, openai_client=client)
 
     assert result.steps[0].action == ActionType.click
-    assert result.steps[0].target == "terms"
+    assert result.steps[0].target is None
     assert result.steps[0].raw_text == scenario
 
 
@@ -1037,3 +1058,95 @@ def test_free_text_system_uses_shared_assertion_rules():
 
 def test_gherkin_system_uses_shared_assertion_rules():
     assert _ASSERTION_RULES.strip() in _GHERKIN_SYSTEM
+
+# ---------------------------------------------------------------------------
+# Stage 1 intent binding and its report
+# ---------------------------------------------------------------------------
+
+INTENT_SCENARIO = "1. Click the **Sign in** button.\n2. Click Save.\n"
+
+
+def _intent_trace(*intents: ReportedIntent | None) -> _LLMTrace:
+    raw_texts = ["Click the **Sign in** button.", "Click Save."]
+    return _make_llm_trace(steps=[
+        _LLMStep(action=ActionType.click, target=target, raw_text=raw, intent=intent)
+        for target, raw, intent in zip(("Sign in button", "Save"), raw_texts, intents)
+    ])
+
+
+def _sign_in_intent(**overrides: str) -> ReportedIntent:
+    fields = {
+        "operation": "activate", "operation_text": "Click", "kind": "button",
+        "kind_text": "button", "name": "Sign in",
+    }
+    fields.update(overrides)
+    return ReportedIntent(**fields)
+
+
+def _parse_intents(*intents: ReportedIntent | None) -> ExpectedTrace:
+    client = _make_instructor_client(_intent_trace(*intents))
+    return parse_scenario(INTENT_SCENARIO, openai_client=client)
+
+
+def test_parse_scenario_binds_a_simple_click_intent():
+    parsed = _parse_intents(_sign_in_intent(), None)
+
+    assert parsed.steps[0].action_intent is not None
+    assert parsed.steps[0].action_intent.object.name == "Sign in"
+
+
+def test_parse_scenario_binds_an_intent_with_capitalised_operation():
+    parsed = _parse_intents(_sign_in_intent(operation="Activate"), None)
+
+    assert parsed.steps[0].action_intent is not None
+
+
+def test_parse_scenario_reports_a_bound_intent():
+    parsed = _parse_intents(_sign_in_intent(), None)
+
+    assert parsed.intent_report.diagnostics[0].status == IntentParseStatus.bound
+
+
+def test_parse_scenario_reports_a_missing_intent_as_omitted():
+    parsed = _parse_intents(_sign_in_intent(), None)
+
+    second = parsed.intent_report.diagnostics[1]
+    assert (second.status, second.reason, parsed.steps[1].action_intent) == (
+        IntentParseStatus.omitted, None, None,
+    )
+
+
+def test_parse_scenario_reports_why_an_intent_was_rejected():
+    parsed = _parse_intents(_sign_in_intent(kind="website"), None)
+
+    first = parsed.intent_report.diagnostics[0]
+    assert (first.status, first.reason, first.slot) == (
+        IntentParseStatus.rejected, IntentRejectionReason.unsupported_kind, "kind",
+    )
+
+
+def test_parse_scenario_keeps_the_steps_when_an_intent_is_rejected():
+    parsed = _parse_intents(_sign_in_intent(kind="website"), None)
+
+    assert [step.target for step in parsed.steps] == ["Sign in button", "Save"]
+    assert parsed.steps[0].action_intent is None
+
+
+def test_parse_scenario_reports_one_diagnostic_per_step():
+    parsed = _parse_intents(_sign_in_intent(), None)
+
+    assert [d.step_index for d in parsed.intent_report.diagnostics] == [1, 2]
+
+
+def test_parse_scenario_stamps_the_report_with_the_contract_version():
+    parsed = _parse_intents(None, None)
+
+    assert parsed.intent_report.contract_version == INTENT_CONTRACT_VERSION
+
+
+def test_parse_scenario_reports_an_unlocatable_sentence():
+    client = _make_instructor_client(_intent_trace(_sign_in_intent(), None))
+
+    parsed = parse_scenario("Please sign in somehow.", openai_client=client)
+
+    assert parsed.intent_report.diagnostics[0].reason == IntentRejectionReason.step_span_unavailable

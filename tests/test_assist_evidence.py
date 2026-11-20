@@ -286,7 +286,7 @@ def test_initiation_alone_never_clears_assertion():
                     for cid in ids
                 ]
             )
-        from reckon.assist_propose import _AssistBatchResponse, _AssistDecision
+        from reckon.assist_propose import _AssistBatchResponse
 
         return _AssistBatchResponse(decisions=[])
 

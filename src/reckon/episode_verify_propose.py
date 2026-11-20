@@ -65,10 +65,6 @@ class EpisodeVerifyDecision(BaseModel):
     rationale: str = Field(min_length=1)
 
 
-# Backwards-compatible alias matching the requested proposal name.
-EpisodeVerificationProposal = EpisodeVerifyDecision
-
-
 def _format_episode_block(episode: ScreenEpisode) -> str:
     texts = "; ".join(repr(text) for text in episode.visible_texts) or "(none)"
     actions = "; ".join(episode.actions_summary) or "(none)"

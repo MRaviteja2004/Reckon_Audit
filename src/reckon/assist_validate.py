@@ -8,7 +8,6 @@ from reckon.schema import (
     AssistProposalRecord,
     AssistProposalStatus,
     ExpectedTrace,
-    FindingType,
     ObservedTrace,
 )
 from reckon.tolerance import actions_compatible, assertion_satisfied

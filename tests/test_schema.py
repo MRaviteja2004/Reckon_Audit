@@ -14,7 +14,14 @@ from reckon.schema import (
     CrossCheckVerdict,
     ExpectedStep,
     ExpectedTrace,
+    IntentDiagnostic,
+    IntentParseReport,
+    IntentParseStatus,
+    IntentRejectionReason,
+    InteractionParseStatus,
+    InteractionRejectionReason,
     ObservedAction,
+    ObservedInteractionDiagnostic,
     ObservedTrace,
     merge_observed_chunks,
 )
@@ -302,3 +309,118 @@ def test_crosscheck_target_rejects_anchor_outside_window():
             window_end_ms=3000,
             anchor_timestamp_ms=4000,
         )
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 intent report
+# ---------------------------------------------------------------------------
+
+def test_expected_trace_from_legacy_json_has_no_intent_report():
+    data = json.loads((FIXTURES / "login_expected.json").read_text())
+    assert "intent_report" not in data
+
+    trace = ExpectedTrace.model_validate(data)
+
+    assert trace.intent_report is None
+
+
+def test_expected_trace_from_legacy_json_has_no_step_intents():
+    data = json.loads((FIXTURES / "login_expected.json").read_text())
+
+    trace = ExpectedTrace.model_validate(data)
+
+    assert all(step.action_intent is None for step in trace.steps)
+
+
+def test_expected_trace_round_trips_its_intent_report():
+    data = json.loads((FIXTURES / "login_expected.json").read_text())
+    trace = ExpectedTrace.model_validate(data)
+    report = IntentParseReport(
+        contract_version="2",
+        diagnostics=[
+            IntentDiagnostic(
+                step_index=1,
+                status=IntentParseStatus.rejected,
+                reason=IntentRejectionReason.unsupported_kind,
+                slot="kind",
+            )
+        ],
+    )
+
+    reloaded = ExpectedTrace.model_validate_json(
+        trace.model_copy(update={"intent_report": report}).model_dump_json()
+    )
+
+    assert reloaded.intent_report == report
+
+
+def test_intent_diagnostic_requires_a_reason_when_rejected():
+    with pytest.raises(ValidationError):
+        IntentDiagnostic(step_index=1, status=IntentParseStatus.rejected)
+
+
+@pytest.mark.parametrize("status", [IntentParseStatus.bound, IntentParseStatus.omitted])
+def test_intent_diagnostic_forbids_a_reason_unless_rejected(status: IntentParseStatus):
+    with pytest.raises(ValidationError):
+        IntentDiagnostic(
+            step_index=1, status=status, reason=IntentRejectionReason.missing_field
+        )
+
+
+def test_intent_rejection_reasons_are_the_documented_set():
+    assert {reason.value for reason in IntentRejectionReason} == {
+        "missing_field", "unsupported_operation", "unsupported_kind",
+        "step_span_unavailable", "invalid_citation", "ambiguous_citation",
+        "binding_failed",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 interaction diagnostics
+# ---------------------------------------------------------------------------
+
+def test_observed_trace_from_legacy_json_has_no_interaction_data():
+    data = json.loads((FIXTURES / "login_observed_passing.json").read_text())
+
+    trace = ObservedTrace.model_validate(data)
+
+    assert all(
+        (a.interaction, a.interaction_diagnostic) == (None, None) for a in trace.actions
+    )
+
+
+def test_observed_action_round_trips_its_interaction_diagnostic():
+    diagnostic = ObservedInteractionDiagnostic(
+        contract_version="1",
+        status=InteractionParseStatus.rejected,
+        reason=InteractionRejectionReason.unsupported_kind,
+        slot="kind",
+        offered_kind="textbox",
+    )
+    action = ObservedAction(
+        index=1, timestamp_ms=0, action=ActionType.click, target="Sign in",
+        confidence=0.9, interaction_diagnostic=diagnostic,
+    )
+
+    assert ObservedAction.model_validate_json(action.model_dump_json()) == action
+
+
+def test_interaction_diagnostic_requires_a_reason_when_rejected():
+    with pytest.raises(ValidationError):
+        ObservedInteractionDiagnostic(contract_version="1", status=InteractionParseStatus.rejected)
+
+
+@pytest.mark.parametrize("status", [InteractionParseStatus.bound, InteractionParseStatus.omitted])
+def test_interaction_diagnostic_forbids_a_reason_unless_rejected(status: InteractionParseStatus):
+    with pytest.raises(ValidationError):
+        ObservedInteractionDiagnostic(
+            contract_version="1", status=status, reason=InteractionRejectionReason.missing_field
+        )
+
+
+def test_interaction_rejection_reasons_are_the_documented_set():
+    assert {reason.value for reason in InteractionRejectionReason} == {
+        "missing_field", "unsupported_operation", "unsupported_kind",
+        "unsupported_surface", "surface_unavailable", "operation_contradicts_action",
+        "invalid_citation", "ambiguous_citation", "binding_failed",
+    }

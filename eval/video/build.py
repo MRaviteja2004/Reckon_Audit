@@ -11,6 +11,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import av
+from PIL import Image
 
 from eval.video.cases import Case, Step
 from eval.video.render import HEIGHT, WIDTH, draw_cursor, render
@@ -60,7 +61,7 @@ def _cursor_at(steps: list[Step], time_ms: int) -> tuple[int, int]:
     )
 
 
-def _render_timeline(case: Case, frame_index: int) -> "Image":
+def _render_timeline(case: Case, frame_index: int) -> Image.Image:
     time_ms = int(frame_index * _MS_PER_S / FPS)
     step = _step_at(case.steps, time_ms)
     state = step.state

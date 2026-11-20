@@ -299,6 +299,128 @@ def test_non_landing_assertion_still_requires_full_token_containment():
     )
 
 
+def _navigate(target: str, screen: str, visible_text: str | None = None) -> ObservedAction:
+    evidence = (
+        AssertionEvidence(description=screen, visible_text=visible_text)
+        if visible_text is not None
+        else None
+    )
+    return ObservedAction(
+        index=13,
+        action=ActionType.navigate,
+        target=target,
+        timestamp_ms=30266,
+        assertion_evidence=evidence,
+        confidence=0.9,
+        screen_description=screen,
+    )
+
+
+def _dashboard_heading(visible_text: str) -> ObservedAction:
+    return _obs(
+        14,
+        ActionType.assert_visible,
+        "Dashboard",
+        AssertionEvidence(description="Home page after sign-in", visible_text=visible_text),
+    )
+
+
+def test_dashboard_assertion_rejects_signed_out_homepage_navigation():
+    obs = _navigate("github.com", "GitHub homepage, signed out, Sign up button")
+    assert not assertion_satisfied(
+        "It should display GitHub dashboard", obs, expected_target="GitHub dashboard"
+    )
+
+
+def test_dashboard_assertion_rejects_site_visible_text_without_dashboard():
+    obs = _navigate("github.com", "GitHub homepage", visible_text="Sign up for GitHub")
+    assert not assertion_satisfied(
+        "It should display GitHub dashboard", obs, expected_target="GitHub dashboard"
+    )
+
+
+def test_page_assertion_accepts_navigation_with_identity_in_visible_text():
+    obs = _navigate("github.com/login", "Sign in page", visible_text="Sign in to GitHub")
+    assert assertion_satisfied(
+        "the GitHub sign-in page is displayed",
+        obs,
+        expected_target="GitHub sign-in page",
+    )
+
+
+def test_dashboard_assertion_accepts_identity_from_opening_navigation():
+    assert assertion_satisfied(
+        "It should display GitHub dashboard",
+        _dashboard_heading("Dashboard"),
+        expected_target="GitHub dashboard",
+        context_target="github.com",
+    )
+
+
+def test_dashboard_assertion_rejects_heading_without_opening_navigation():
+    assert not assertion_satisfied(
+        "It should display GitHub dashboard",
+        _dashboard_heading("Dashboard"),
+        expected_target="GitHub dashboard",
+    )
+
+
+def test_dashboard_assertion_rejects_opening_navigation_to_another_site():
+    assert not assertion_satisfied(
+        "It should display GitHub dashboard",
+        _dashboard_heading("Dashboard"),
+        expected_target="GitHub dashboard",
+        context_target="gitlab.com",
+    )
+
+
+def test_dashboard_assertion_rejects_negated_visible_text():
+    assert not assertion_satisfied(
+        "It should display GitHub dashboard",
+        _dashboard_heading("Unable to load dashboard"),
+        expected_target="GitHub dashboard",
+        context_target="github.com",
+    )
+
+
+def test_page_assertion_rejects_identity_only_in_ambient_visible_text():
+    ev = AssertionEvidence(
+        description="Vehicle form with a sidebar link",
+        visible_text="Add your vehicle Background check",
+    )
+    obs = ObservedAction(
+        index=40,
+        action=ActionType.assert_visible,
+        target="Vehicle information page",
+        timestamp_ms=60000,
+        assertion_evidence=ev,
+        confidence=0.85,
+    )
+    assert not assertion_satisfied(
+        "User should land on Background check screen.",
+        obs,
+        expected_target="Background check screen",
+    )
+
+
+def test_page_assertion_rejects_identity_only_in_model_description():
+    ev = AssertionEvidence(description="Background check page", visible_text="Welcome")
+    obs = ObservedAction(
+        index=30,
+        action=ActionType.assert_visible,
+        target="Main panel",
+        timestamp_ms=51266,
+        assertion_evidence=ev,
+        confidence=0.85,
+        screen_description="Background check screen",
+    )
+    assert not assertion_satisfied(
+        "User should land on Background check screen.",
+        obs,
+        expected_target="Background check screen",
+    )
+
+
 # ---------------------------------------------------------------------------
 # actions_compatible
 # ---------------------------------------------------------------------------

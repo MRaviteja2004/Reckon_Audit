@@ -40,6 +40,7 @@ from reckon.latency import (
     monotonic_ms,
     resolve_latency,
 )
+from reckon.ownership import reconcile_ownership
 from reckon.parser import make_openai_client
 from reckon.retry import RetryCallback, call_with_retry
 
@@ -524,8 +525,10 @@ def _rebuild_audit_result(
     audit_result: AuditResult,
     findings: list[Finding],
     *,
+    observed_trace: ObservedTrace,
     evidence_retargets: dict[int, tuple[int | None, int | None]] | None = None,
 ) -> AuditResult:
+    """Rebuild verdicts from findings; a retarget never moves onto another step's evidence."""
     finding_types_by_step: dict[int, list[FindingType]] = {}
     for finding in findings:
         if finding.expected_step_index is not None:
@@ -534,28 +537,41 @@ def _rebuild_audit_result(
             ).append(finding.type)
 
     retargets = evidence_retargets or {}
+    owners = {
+        verdict.matched_observed_index: verdict.expected_step_index
+        for verdict in audit_result.step_verdicts
+        if verdict.passed and verdict.matched_observed_index is not None
+    }
     step_verdicts = []
+    released: set[int] = set()
     for step_verdict in audit_result.step_verdicts:
-        finding_types = finding_types_by_step.get(
-            step_verdict.expected_step_index, []
-        )
+        step_index = step_verdict.expected_step_index
+        finding_types = finding_types_by_step.get(step_index, [])
         update: dict[str, object] = {
             "finding_types": finding_types,
             "passed": len(finding_types) == 0,
         }
-        if step_verdict.expected_step_index in retargets:
-            matched_index, evidence_ts = retargets[step_verdict.expected_step_index]
-            update["matched_observed_index"] = matched_index
-            update["evidence_timestamp_ms"] = evidence_ts
+        if step_index in retargets:
+            matched_index, evidence_ts = retargets[step_index]
+            if owners.get(matched_index, step_index) == step_index:
+                update["matched_observed_index"] = matched_index
+                update["evidence_timestamp_ms"] = evidence_ts
+                previous = step_verdict.matched_observed_index
+                if previous is not None and previous != matched_index:
+                    released.add(previous)
         step_verdicts.append(step_verdict.model_copy(update=update))
 
     total = len(step_verdicts)
     passed = sum(1 for verdict in step_verdicts if verdict.passed)
-    return AuditResult(
-        verdict=verdict_for(findings),
-        fidelity_score=passed / total if total > 0 else 1.0,
-        findings=findings,
-        step_verdicts=step_verdicts,
+    return reconcile_ownership(
+        AuditResult(
+            verdict=verdict_for(findings),
+            fidelity_score=passed / total if total > 0 else 1.0,
+            findings=findings,
+            step_verdicts=step_verdicts,
+        ),
+        observed_trace,
+        released=released,
     )
 
 
@@ -612,7 +628,9 @@ def _apply_semantic_decisions(
         if not remove_target:
             new_findings.append(finding)
 
-    return _rebuild_audit_result(audit_result, new_findings)
+    return _rebuild_audit_result(
+        audit_result, new_findings, observed_trace=observed_trace
+    )
 
 
 # Assist clears below this confidence still receive Stage 4 visual review even
@@ -1053,7 +1071,10 @@ def _apply_verdicts(
         )
 
     refined = _rebuild_audit_result(
-        audit_result, new_findings, evidence_retargets=evidence_retargets
+        audit_result,
+        new_findings,
+        observed_trace=observed_trace,
+        evidence_retargets=evidence_retargets,
     )
     if not reinstate_steps:
         return refined

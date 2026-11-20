@@ -18,7 +18,6 @@ from reckon.schema import (
     ActionType,
     AssertionEvidence,
     AssistCandidateKind,
-    AssistMatchMethod,
     AssistProposalStatus,
     AuditResult,
     AuditVerdict,
@@ -854,6 +853,61 @@ def test_assertion_may_use_click_when_no_passive_proof_exists():
     assert proof is not None
     assert proof.index == 1
     assert proof.action == ActionType.click
+
+
+def _dashboard_step() -> ExpectedStep:
+    return ExpectedStep(
+        index=7,
+        action=ActionType.assert_visible,
+        target="GitHub dashboard",
+        assertion="It should display GitHub dashboard",
+        raw_text="It should display GitHub dashboard",
+    )
+
+
+def _post_sign_in_navigation(screen: str) -> ObservedAction:
+    return _obs(
+        13,
+        timestamp_ms=30266,
+        action=ActionType.navigate,
+        target="github.com",
+        screen=screen,
+    )
+
+
+def test_fast_path_rejects_signed_out_homepage_for_dashboard_assertion():
+    observed = ObservedTrace(
+        source_file="x.mp4",
+        actions=[_post_sign_in_navigation("GitHub homepage, signed out")],
+    )
+    episodes = cluster_observed_episodes(observed)
+    assert best_proof_action(_dashboard_step(), episodes[0], observed) is None
+
+
+def test_fast_path_proves_dashboard_with_heading_and_opening_navigation():
+    observed = ObservedTrace(
+        source_file="x.mp4",
+        actions=[
+            _post_sign_in_navigation("GitHub Dashboard home page loaded"),
+            _obs(
+                14,
+                timestamp_ms=30266,
+                action=ActionType.assert_visible,
+                target="Dashboard",
+                screen="GitHub Dashboard home page loaded",
+                visible_text="Dashboard",
+                description="Dashboard Home page displayed after login",
+            ),
+        ],
+    )
+    episode = next(
+        item
+        for item in cluster_observed_episodes(observed)
+        if item.start_index <= 14 <= item.end_index
+    )
+    proof = best_proof_action(_dashboard_step(), episode, observed)
+    assert proof is not None
+    assert proof.index == 14
 
 
 def test_interaction_remap_recovers_click_inside_verified_window():

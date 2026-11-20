@@ -11,8 +11,9 @@ The pass is organised around what actually happened in it:
      rather than on a fixed cadence, so the budget is spent on moments that carry
      information instead of on a static screen.
   4. Extraction — one vision call per window.
-  5. Merge — merge_observed_chunks() reassembles the chunks, converting each
-     clip-relative timestamp back to a recording-absolute one.
+  5. Merge — drop_split_seam_duplicates() removes the one action a split seam can
+     report twice, then merge_observed_chunks() reassembles the chunks, converting
+     each clip-relative timestamp back to a recording-absolute one.
 
 Evidence timestamps are anchored to frames chosen in code, never to a time the model
 reported; see extractor.py for why that distinction carries the audit.
@@ -35,12 +36,14 @@ from reckon.latency import (
 )
 from reckon.retry import RetryCallback
 from reckon.schema import ObservedTrace, merge_observed_chunks
+from reckon.seams import drop_split_seam_duplicates
 from reckon.stage2.adaptive_sampling import (
     AdaptiveSamplingState,
     densify_window_frames,
     frames_were_densified,
     update_adaptive_state,
 )
+from reckon.stage2.gap_coverage import samples_for_policy
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +126,16 @@ def derive_action_windows(
     return bounded
 
 
+def _windows_within(change_events: list[int], duration_ms: int) -> list[tuple[int, int]]:
+    """Action windows for the events, clipped to the recording's duration."""
+    clipped = [
+        (start, min(end, duration_ms))
+        for start, end in derive_action_windows(change_events)
+        if start < duration_ms
+    ]
+    return [(start, end) for start, end in clipped if end > start]
+
+
 def _thin_evenly(values: list[int], max_count: int) -> list[int]:
     """Reduce values to at most max_count entries, always keeping the first and last."""
     if len(values) <= max_count:
@@ -191,6 +204,7 @@ def extract_observed_trace(
             len(change_events),
         )
 
+    detected_events = bool(change_events)
     if not change_events:
         # Stand-in events on a uniform grid, so the fallback flows through the same
         # windowing and frame-selection path as a normally detected recording.
@@ -201,12 +215,18 @@ def extract_observed_trace(
                 latency.window_count = 0
             return ObservedTrace(source_file=source_file, actions=[])
         change_events = [stride_ms * i for i in range(1, FALLBACK_FRAME_COUNT + 1)]
-    windows = [
-        (start, min(end, duration_ms))
-        for start, end in derive_action_windows(change_events)
-        if start < duration_ms
-    ]
-    windows = [(start, end) for start, end in windows if end > start]
+    gap_samples: list[int] = []
+    if detected_events:
+        gap_samples = samples_for_policy(
+            config.STAGE2_GAP_SAMPLING_POLICY,
+            _windows_within(change_events, duration_ms),
+            duration_ms,
+            change_events,
+            min_gap_ms=config.STAGE2_GAP_MIN_MS,
+            max_extra_frames=config.STAGE2_GAP_MAX_EXTRA_FRAMES,
+        )
+        change_events = sorted({*change_events, *gap_samples})
+    windows = _windows_within(change_events, duration_ms)
     if not windows:
         if latency is not None:
             latency.stage2b_ms = 0.0
@@ -300,4 +320,5 @@ def extract_observed_trace(
             latency.retry_count,
             latency.retry_sleep_s,
         )
-    return merge_observed_chunks(chunks)
+    merged = merge_observed_chunks(drop_split_seam_duplicates(chunks))
+    return merged.model_copy(update={"gap_sample_timestamps_ms": gap_samples})

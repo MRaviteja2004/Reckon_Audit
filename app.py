@@ -6,7 +6,12 @@ Run with:
 Stage 1 (parse scenario) uses USSO_TOKEN through Uber AI Gateway.
 Stage 2 (extract trace)  uses the same gateway; frames are decoded locally.
 Stage 3 (align traces)   is deterministic by default; an optional experimental
-LLM-assisted path is available in the UI only.
+evidence-aware agent review (with Stage 2C frame evidence) is available in the UI only.
+
+Every run is persisted under RECKON_RECORDINGS_DIR (default ``recordings/``): one
+folder per recording with stage-1, versioned stage-2/2c artifacts and versioned
+Stage 3 / Stage 4 evaluations, so Stage 2, Stage 3 and Stage 4 can be re-run
+independently from saved data.
 """
 
 import json
@@ -25,20 +30,33 @@ from dotenv import load_dotenv
 # EXTRACTION_MODEL at module level via os.environ.get.
 load_dotenv()
 
-from reckon.aligner import align  # noqa: E402
-from reckon.assist import align_with_assist  # noqa: E402
 from reckon.assist_propose import ALIGN_ASSIST_MODEL  # noqa: E402
-from reckon.crosscheck import run_cross_check  # noqa: E402
-from reckon.extractor import make_client  # noqa: E402
 from reckon.latency import (  # noqa: E402
     LatencyMetrics,
     elapsed_ms,
-    latency_scope,
     log_metrics,
     monotonic_ms,
 )
 from reckon.parser import make_openai_client, parse_scenario  # noqa: E402
-from reckon.sampler import extract_observed_trace  # noqa: E402
+from reckon.persistence import (  # noqa: E402
+    STAGE1_FILENAME,
+    ArtifactIntegrityError,
+    MissingArtifactError,
+    RecordingBusyError,
+    RecordingManifest,
+    RecordingStore,
+    RunStatus,
+    Stage3Evaluation,
+    Stage3Mode,
+    Stage4Evaluation,
+    VideoRetention,
+    build_stage1_artifact,
+    run_stage2,
+    run_stage3,
+    run_stage4,
+    stage2c_filename,
+    utc_now,
+)
 from reckon.schema import (  # noqa: E402
     AssistMatchMethod,
     AssistProposalStatus,
@@ -53,7 +71,6 @@ from reckon.schema import (  # noqa: E402
     ObservedTrace,
     SemanticDiagnostic,
 )
-from reckon.stage2c import build_frame_manifest  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +82,14 @@ MAX_UPLOAD_SIZE_MB = 500
 MAX_EXPORT_FILENAME_LENGTH = 120
 
 STAGE3_MODE_DETERMINISTIC = "Deterministic (default)"
-STAGE3_MODE_ASSISTED = "LLM-assisted (experimental)"
 STAGE3_MODE_EVIDENCE = "LLM-assisted evidence-aware (experimental)"
+_STAGE3_MODES: dict[str, Stage3Mode] = {
+    STAGE3_MODE_DETERMINISTIC: Stage3Mode.deterministic,
+    STAGE3_MODE_EVIDENCE: Stage3Mode.evidence_aware,
+}
+_STAGE3_MODE_LABELS: dict[Stage3Mode, str] = {
+    mode: label for label, mode in _STAGE3_MODES.items()
+}
 
 _FINDING_LABELS: dict[FindingType, str] = {
     FindingType.missing_action: "Missing Action",
@@ -265,67 +288,6 @@ def _render_export_download() -> None:
         ),
         mime="application/json",
     )
-
-
-class _AssistUsageTracker:
-    """Optional UI-only wrapper that records token usage from assist LLM calls."""
-
-    def __init__(self, client: Any) -> None:
-        self._client = client
-        self.requests: list[dict[str, Any]] = []
-
-    @property
-    def chat(self) -> Any:
-        return self
-
-    @property
-    def completions(self) -> Any:
-        return self
-
-    def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = self._client.chat.completions.create(*args, **kwargs)
-        usage_info: dict[str, Any] = {"available": False}
-        raw = getattr(response, "_raw_response", None) or getattr(
-            response, "completion", None
-        )
-        usage = getattr(raw, "usage", None) if raw is not None else None
-        if usage is None:
-            usage = getattr(response, "usage", None)
-        if usage is not None:
-            usage_info = {
-                "available": True,
-                "prompt_tokens": getattr(usage, "prompt_tokens", None),
-                "completion_tokens": getattr(usage, "completion_tokens", None),
-                "total_tokens": getattr(usage, "total_tokens", None),
-            }
-        self.requests.append({"model": kwargs.get("model"), "usage": usage_info})
-        return response
-
-
-def _assist_token_usage_summary(requests: list[dict[str, Any]]) -> dict[str, Any]:
-    available = [req for req in requests if req.get("usage", {}).get("available")]
-    return {
-        "request_count": len(requests),
-        "usage_available_count": len(available),
-        "prompt_tokens_sum": sum(
-            (req.get("usage") or {}).get("prompt_tokens") or 0 for req in available
-        ),
-        "completion_tokens_sum": sum(
-            (req.get("usage") or {}).get("completion_tokens") or 0 for req in available
-        ),
-        "total_tokens_sum": sum(
-            (req.get("usage") or {}).get("total_tokens") or 0 for req in available
-        ),
-        "requests": requests,
-    }
-
-
-def _reviewed_skip_pairs(assist: AssistReport) -> set[tuple[int, int]]:
-    """Only accepted Stage 3 resolutions are excluded from Stage 4 semantic review."""
-    return {
-        (pair.expected_step_index, pair.observed_action_index)
-        for pair in assist.reviewed_semantic_pairs
-    }
 
 
 def _observation_timestamp_label(
@@ -913,7 +875,7 @@ def _render_debug_panel() -> None:
 
 
 def _write_recording_to_temp(video: BinaryIO | bytes, destination: IO[bytes]) -> None:
-    """Persist an uploaded recording to an open temp file without an extra full copy.
+    """Copy an uploaded recording into an open file without an extra full copy.
 
     bytes inputs (used by tests) are written directly. File-like inputs are copied
     in chunks via shutil.copyfileobj so callers can pass a Streamlit UploadedFile
@@ -926,26 +888,8 @@ def _write_recording_to_temp(video: BinaryIO | bytes, destination: IO[bytes]) ->
     shutil.copyfileobj(video, destination)
 
 
-def _run_pipeline(
-    video: BinaryIO | bytes,
-    video_name: str,
-    scenario_text: str,
-    run_crosscheck: bool,
-    stage3_mode: str = STAGE3_MODE_DETERMINISTIC,
-) -> tuple[AuditResult, ExpectedTrace] | None:
-    """Run Stage 1 → Stage 2 → Stage 3 (→ optional cross-check) with a live status widget.
-
-    Returns (AuditResult, ExpectedTrace) on success, or None on failure
-    (error messages are shown via st.error before returning). When run_crosscheck is
-    set, the cross-check verdicts are stored in st.session_state["crosscheck"] and the
-    returned AuditResult is the refined one.
-    Intermediate results and full tracebacks are written to st.session_state["debug"]
-    so the debug panel can display them regardless of whether the run succeeded.
-
-    stage3_mode selects Deterministic (default: align()) or experimental LLM-assisted
-    (align_with_assist). Assisted mode is UI-only; accepted resolutions are passed to
-    Stage 4 as skip_semantic_pairs.
-    """
+def _reset_run_state(stage3_mode: str) -> dict:
+    """Clear per-run session state and return a fresh debug dict."""
     debug: dict = {
         "stage1": None,
         "stage2": None,
@@ -964,19 +908,262 @@ def _run_pipeline(
     st.session_state["assisted_stage3"] = None
     st.session_state["stage3_token_usage"] = None
     st.session_state["observed_trace"] = None
+    return debug
+
+
+def _on_assist_retry(attempt: int, code: int, delay_s: float) -> None:
+    st.write(f"⏳ Assist model is busy (HTTP {code}) — retry {attempt} in {delay_s:.0f}s…")
+
+
+def _replay_warning(evaluation: Stage3Evaluation) -> str | None:
+    replay = evaluation.stage2c_replay
+    if replay is None or not replay.unmatched_targets:
+        return None
+    return (
+        "Stage 2C replay: the saved batch never answered "
+        f"{', '.join(replay.unmatched_targets)}. These steps were not searched "
+        '(not "searched, not found"); retry Stage 2 to search them.'
+    )
+
+
+def _execute_stage3(
+    store: RecordingStore,
+    recording_id: str,
+    mode: Stage3Mode,
+    debug: dict,
+    *,
+    stage2_version: int | None = None,
+    video_path: Path | None = None,
+) -> Stage3Evaluation:
+    """Run and persist Stage 3 from saved artifacts, reporting progress in the status box."""
+    s2_version = (
+        stage2_version if stage2_version is not None else store.latest_stage2_version(recording_id)
+    )
+    if mode == Stage3Mode.evidence_aware:
+        st.write(
+            "Stage 3 — Aligning with LLM assist + evidence-aware + Stage 2C "
+            f"({ALIGN_ASSIST_MODEL}) on Stage 2 v{s2_version}"
+        )
+        if store.has_artifact(recording_id, stage2c_filename(s2_version)):
+            st.write("Stage 2C — replaying saved frame evidence (no new Stage 2C model call)")
+        evaluation = run_stage3(
+            store,
+            recording_id,
+            mode=mode,
+            stage2_version=s2_version,
+            openai_client=make_openai_client(),
+            on_retry=_on_assist_retry,
+            video_path=video_path,
+        )
+        assist = evaluation.assist
+        assert assist is not None and evaluation.result is not None
+        n_cand = (
+            len(assist.candidate_evidence.candidates)
+            if assist.candidate_evidence is not None
+            else 0
+        )
+        debug["stage3_assist"] = assist.model_dump_json(indent=2)
+        st.write(
+            "Stage 3 complete (LLM-assisted evidence-aware) — "
+            f"fidelity score: {evaluation.result.fidelity_score:.0%}, "
+            f"{len(evaluation.result.findings)} finding(s); "
+            f"accepted {assist.metrics.proposals_accepted}, "
+            f"LLM requests {assist.metrics.llm_request_count}; "
+            f"Stage 2C candidates {n_cand}"
+        )
+        warning = _replay_warning(evaluation)
+        if warning is not None:
+            st.warning(warning)
+    else:
+        st.write(f"Stage 3 — Aligning expected and observed traces (Stage 2 v{s2_version})")
+        evaluation = run_stage3(store, recording_id, mode=mode, stage2_version=s2_version)
+        assert evaluation.result is not None
+        st.write(
+            f"Stage 3 complete — fidelity score: {evaluation.result.fidelity_score:.0%}, "
+            f"{len(evaluation.result.findings)} finding(s)"
+        )
+    if evaluation.inputs.unverified_artifacts:
+        st.caption(
+            "Inputs saved before checksums were recorded: "
+            + ", ".join(evaluation.inputs.unverified_artifacts)
+        )
+    debug["stage3"] = evaluation.result.model_dump_json(indent=2)
+    st.write(f"Saved Stage 3 evaluation v{evaluation.version}")
+    return evaluation
+
+
+def _execute_stage4(
+    store: RecordingStore,
+    recording_id: str,
+    stage3_version: int,
+    debug: dict,
+    latency: LatencyMetrics,
+    *,
+    video_path: Path | None = None,
+) -> Stage4Evaluation:
+    st.write(
+        "Stage 4 — Cross-checking assertions and low-confidence steps "
+        f"(from Stage 3 v{stage3_version})"
+    )
+    evaluation = run_stage4(
+        store, recording_id, stage3_version, latency=latency, video_path=video_path
+    )
+    assert evaluation.report is not None
+    debug["crosscheck"] = evaluation.report.model_dump_json(indent=2)
+    st.write(_stage4_completion_message(evaluation.report))
+    st.write(f"Saved Stage 4 evaluation v{evaluation.version}")
+    return evaluation
+
+
+def _on_extraction_retry(attempt: int, code: int, delay_s: float) -> None:
+    st.write(f"⏳ Extraction model is busy (HTTP {code}) — retry {attempt} in {delay_s:.0f}s…")
+
+
+def _execute_stage2(
+    store: RecordingStore,
+    recording_id: str,
+    debug: dict,
+    latency: LatencyMetrics,
+    *,
+    video_path: Path | None = None,
+) -> ObservedTrace:
+    st.write("Stage 2 — Extracting observed trace from change-event frames")
+    artifact = run_stage2(
+        store,
+        recording_id,
+        video_path=video_path,
+        on_retry=_on_extraction_retry,
+        latency=latency,
+    )
+    observed_trace = artifact.observed_trace
+    debug["stage2"] = observed_trace.model_dump_json(indent=2)
+    st.write(
+        f"Stage 2 complete — {len(observed_trace.actions)} observed action(s) extracted; "
+        f"saved as Stage 2 v{artifact.version}"
+    )
+    return observed_trace
+
+
+def _present_evaluation(
+    *,
+    recording: RecordingManifest,
+    expected_trace: ExpectedTrace,
+    observed_trace: ObservedTrace,
+    stage3: Stage3Evaluation,
+    stage4: Stage4Evaluation | None,
+    latency: LatencyMetrics | None,
+) -> tuple[AuditResult, ExpectedTrace]:
+    """Populate session state from persisted records; return what _render_results shows."""
+    assert stage3.result is not None
+    assist = stage3.assist
+    report = stage4.report if stage4 is not None else None
+    mode_label = _STAGE3_MODE_LABELS[stage3.mode]
+    st.session_state["stage3_mode"] = mode_label
+    st.session_state["stage3_assist"] = assist
+    st.session_state["deterministic_stage3"] = (
+        stage3.deterministic_result if assist is not None else None
+    )
+    st.session_state["assisted_stage3"] = stage3.result if assist is not None else None
+    st.session_state["stage3_token_usage"] = stage3.token_usage
+    st.session_state["observed_trace"] = observed_trace
+    if report is not None and report.semantic_diagnostics:
+        st.session_state["semantic_diagnostics"] = report.semantic_diagnostics
+    if report is not None and report.verdicts:
+        st.session_state["crosscheck"] = report.verdicts
+    st.session_state["latency"] = (
+        _latency_session_payload(latency) if latency is not None else None
+    )
+    st.session_state["export"] = _build_export_payload(
+        scenario_title=expected_trace.scenario_title,
+        recording_filename=recording.source_filename,
+        original_audit_result=stage3.result,
+        expected_trace=expected_trace,
+        observed_trace=observed_trace,
+        crosscheck_report=report,
+        latency_metrics=_latency_export_payload(latency) if latency is not None else None,
+        stage3_mode=mode_label,
+        deterministic_stage3=st.session_state["deterministic_stage3"],
+        assisted_stage3=st.session_state["assisted_stage3"],
+        stage3_assist=assist,
+        stage3_token_usage=stage3.token_usage,
+    )
+    final = report.refined_result if report is not None else stage3.result
+    return final, expected_trace
+
+
+def _ingest_video(
+    store: RecordingStore,
+    recording_id: str,
+    video: BinaryIO | bytes,
+    video_name: str,
+    scratch_dir: Path,
+) -> Path:
+    """Store the upload (retention "keep") or only its checksum (retention "discard").
+
+    With "discard" the file lives in ``scratch_dir`` for this run only.
+    """
+    suffix = Path(video_name).suffix or ".mp4"
+    if store.video_retention == VideoRetention.keep:
+        return store.write_video(
+            recording_id,
+            lambda handle: _write_recording_to_temp(video, handle),
+            suffix=suffix,
+        )
+    path = scratch_dir / f"upload{suffix}"
+    with path.open("wb") as handle:
+        _write_recording_to_temp(video, handle)
+    store.record_unretained_video(recording_id, path)
+    return path
+
+
+def _run_pipeline(
+    video: BinaryIO | bytes,
+    video_name: str,
+    scenario_text: str,
+    run_crosscheck: bool,
+    stage3_mode: str = STAGE3_MODE_DETERMINISTIC,
+) -> tuple[AuditResult, ExpectedTrace] | None:
+    """Run Stage 1 → Stage 2 → Stage 3 (→ optional cross-check) for a new recording.
+
+    Each stage's output is persisted as soon as it completes: the recording folder,
+    stage-1.json and the video after Stage 1, stage-2.json after Stage 2, stage-2c.json
+    and a new Stage 3 version after Stage 3, and a new Stage 4 version after Stage 4.
+    An interrupted run therefore keeps everything that finished.
+
+    Returns (AuditResult, ExpectedTrace) on success, or None on failure (error messages
+    are shown via st.error). Intermediate results and full tracebacks are written to
+    st.session_state["debug"] for the debug panel.
+    """
+    debug = _reset_run_state(stage3_mode)
     latency = LatencyMetrics()
     pipeline_started = monotonic_ms()
+    store = RecordingStore.from_env()
 
     with st.status("Running audit pipeline…", expanded=True) as status:
         # ── Stage 1: parse scenario ───────────────────────────────────────────
         st.write("Stage 1 — Parsing expected scenario")
         try:
             openai_client = make_openai_client()
+            stage1_started_at = utc_now()
             stage1_started = monotonic_ms()
             expected_trace = parse_scenario(scenario_text, openai_client=openai_client)
             latency.stage1_ms = elapsed_ms(stage1_started)
             logger.info("stage1 duration_ms=%.1f step_count=%d", latency.stage1_ms, len(expected_trace.steps))
             debug["stage1"] = expected_trace.model_dump_json(indent=2)
+            recording = store.create_recording(
+                title=expected_trace.scenario_title,
+                source_filename=video_name,
+                scenario_text=scenario_text,
+            )
+            recording_id = recording.recording_id
+            store.save_stage1(
+                recording_id,
+                build_stage1_artifact(
+                    expected_trace,
+                    started_at=stage1_started_at,
+                    duration_ms=latency.stage1_ms,
+                ),
+            )
         except Exception as exc:
             debug["errors"].append({"stage": "Stage 1", "error": str(exc), "tb": traceback.format_exc()})
             status.update(label="Stage 1 failed", state="error")
@@ -988,195 +1175,293 @@ def _run_pipeline(
             f"Stage 1 complete — {len(expected_trace.steps)} step(s) parsed: "
             f"{expected_trace.scenario_title}"
         )
+        st.write(f"Saved recording `{recording_id}` to `{store.recording_dir(recording_id)}`")
 
-        # ── Stage 2: extract observed trace ──────────────────────────────────
-        # The temp video is kept until the end of the run: the optional cross-check
-        # pass reads frames from it locally. It is removed in the outer finally.
-        st.write("Stage 2 — Detecting screen changes in the recording")
-        tmp_path: Path | None = None
-        try:
-            suffix = Path(video_name).suffix or ".mp4"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-                _write_recording_to_temp(video, tmp)
-                tmp_path = Path(tmp.name)
-
-            st.write("Stage 2 — Extracting observed trace from change-event frames")
-
-            def _on_extraction_retry(attempt: int, code: int, delay_s: float) -> None:
-                st.write(
-                    f"⏳ Extraction model is busy (HTTP {code}) — retry {attempt} in {delay_s:.0f}s…"
+        with tempfile.TemporaryDirectory(prefix="reckon-upload-") as scratch:
+            try:
+                # ── Stage 2: extract observed trace ──────────────────────────
+                st.write("Stage 2 — Detecting screen changes in the recording")
+                video_path = _ingest_video(store, recording_id, video, video_name, Path(scratch))
+                run_video = None if store.video_retention == VideoRetention.keep else video_path
+                observed_trace = _execute_stage2(
+                    store, recording_id, debug, latency, video_path=run_video
                 )
 
-            # Propagate metrics via latency_scope rather than a latency= kwarg so a
-            # stale cached extract_observed_trace (common under Streamlit reload)
-            # cannot raise TypeError for an unexpected keyword.
-            with latency_scope(latency):
-                observed_trace = extract_observed_trace(
-                    make_client(),
-                    tmp_path,
-                    source_file=video_name,
-                    on_retry=_on_extraction_retry,
+                # ── Stage 3: align traces ─────────────────────────────────────
+                stage3_started = monotonic_ms()
+                stage3 = _execute_stage3(
+                    store, recording_id, _STAGE3_MODES[stage3_mode], debug, video_path=run_video
                 )
-            debug["stage2"] = observed_trace.model_dump_json(indent=2)
-
-            st.write(
-                f"Stage 2 complete — {len(observed_trace.actions)} observed action(s) extracted"
-            )
-
-            # ── Stage 3: align traces ─────────────────────────────────────────
-            stage3_started = monotonic_ms()
-            skip_semantic_pairs: set[tuple[int, int]] | None = None
-            deterministic_stage3: AuditResult | None = None
-            assisted_stage3: AuditResult | None = None
-            stage3_assist: AssistReport | None = None
-            stage3_token_usage: dict[str, Any] | None = None
-
-            if stage3_mode in {STAGE3_MODE_ASSISTED, STAGE3_MODE_EVIDENCE}:
-                evidence_aware = stage3_mode == STAGE3_MODE_EVIDENCE
-                # Stage 2C expected-guided frame evidence runs with evidence-aware mode.
-                frame_evidence = evidence_aware
-                frame_manifest = None
-                if frame_evidence and observed_trace.actions:
-                    timestamps = sorted({
-                        action.timestamp_ms for action in observed_trace.actions
-                    })
-                    if timestamps:
-                        frame_manifest = build_frame_manifest(timestamps)
-                mode_label = (
-                    f"LLM assist + evidence-aware + Stage 2C ({ALIGN_ASSIST_MODEL})"
-                    if evidence_aware
-                    else f"LLM assist ({ALIGN_ASSIST_MODEL})"
+                latency.stage3_ms = elapsed_ms(stage3_started)
+                logger.info(
+                    "stage3 duration_ms=%.1f finding_count=%d mode=%s",
+                    latency.stage3_ms,
+                    len(stage3.result.findings) if stage3.result else 0,
+                    stage3_mode,
                 )
-                st.write(f"Stage 3 — Aligning with {mode_label}")
 
-                def _on_assist_retry(attempt: int, code: int, delay_s: float) -> None:
-                    st.write(
-                        f"⏳ Assist model is busy (HTTP {code}) — "
-                        f"retry {attempt} in {delay_s:.0f}s…"
+                # ── Stage 4 (optional): cross-check pass ──────────────────────
+                stage4: Stage4Evaluation | None = None
+                if run_crosscheck:
+                    stage4 = _execute_stage4(
+                        store, recording_id, stage3.version, debug, latency, video_path=run_video
                     )
-
-                assist_tracker = _AssistUsageTracker(make_openai_client())
-                assisted_bundle = align_with_assist(
-                    expected_trace,
-                    observed_trace,
-                    openai_client=assist_tracker,
-                    model=ALIGN_ASSIST_MODEL,
-                    on_retry=_on_assist_retry,
-                    evidence_aware=evidence_aware,
-                    frame_evidence=frame_evidence,
-                    frame_manifest=frame_manifest,
-                    frame_video_path=tmp_path if frame_evidence else None,
-                )
-                deterministic_stage3 = assisted_bundle.deterministic_result
-                assisted_stage3 = assisted_bundle.result
-                stage3_assist = assisted_bundle.assist
-                original_audit_result = assisted_stage3
-                audit_result = original_audit_result
-                skip_semantic_pairs = _reviewed_skip_pairs(stage3_assist)
-                stage3_token_usage = _assist_token_usage_summary(assist_tracker.requests)
-                debug["stage3_assist"] = stage3_assist.model_dump_json(indent=2)
-                st.session_state["stage3_assist"] = stage3_assist
-                st.session_state["deterministic_stage3"] = deterministic_stage3
-                st.session_state["assisted_stage3"] = assisted_stage3
-                st.session_state["stage3_token_usage"] = stage3_token_usage
-                assist_tag = (
-                    "LLM-assisted evidence-aware"
-                    if evidence_aware
-                    else "LLM-assisted"
-                )
-                stage2c_note = ""
-                if frame_evidence:
-                    n_cand = (
-                        len(stage3_assist.candidate_evidence.candidates)
-                        if stage3_assist.candidate_evidence is not None
-                        else 0
-                    )
-                    stage2c_note = f"; Stage 2C candidates {n_cand}"
-                st.write(
-                    f"Stage 3 complete ({assist_tag}) — "
-                    f"fidelity score: {audit_result.fidelity_score:.0%}, "
-                    f"{len(audit_result.findings)} finding(s); "
-                    f"accepted {stage3_assist.metrics.proposals_accepted}, "
-                    f"LLM requests {stage3_assist.metrics.llm_request_count}"
-                    f"{stage2c_note}"
-                )
-            else:
-                st.write("Stage 3 — Aligning expected and observed traces")
-                original_audit_result = align(expected_trace, observed_trace)
-                audit_result = original_audit_result
-                st.write(
-                    f"Stage 3 complete — fidelity score: {audit_result.fidelity_score:.0%}, "
-                    f"{len(audit_result.findings)} finding(s)"
-                )
-
-            latency.stage3_ms = elapsed_ms(stage3_started)
-            logger.info(
-                "stage3 duration_ms=%.1f finding_count=%d mode=%s",
-                latency.stage3_ms,
-                len(audit_result.findings),
-                stage3_mode,
-            )
-            debug["stage3"] = audit_result.model_dump_json(indent=2)
-            st.session_state["observed_trace"] = observed_trace
-
-            # ── Stage 4 (optional): cross-check pass ──────────────────────────
-            crosscheck_report: CrossCheckReport | None = None
-            if run_crosscheck:
-                st.write("Stage 4 — Cross-checking assertions and low-confidence steps")
-                skip_visual_steps: set[int] | None = None
-                if stage3_assist is not None and stage3_assist.stage2c_skip_visual_steps:
-                    skip_visual_steps = set(stage3_assist.stage2c_skip_visual_steps)
-                with latency_scope(latency):
-                    crosscheck_report = run_cross_check(
-                        expected_trace,
-                        observed_trace,
-                        audit_result,
-                        tmp_path,
-                        skip_semantic_pairs=skip_semantic_pairs,
-                        skip_visual_steps=skip_visual_steps,
-                    )
-                debug["crosscheck"] = crosscheck_report.model_dump_json(indent=2)
-                audit_result = crosscheck_report.refined_result
-                if crosscheck_report.semantic_diagnostics:
-                    st.session_state["semantic_diagnostics"] = (
-                        crosscheck_report.semantic_diagnostics
-                    )
-                if crosscheck_report.verdicts:
-                    st.session_state["crosscheck"] = crosscheck_report.verdicts
-                st.write(_stage4_completion_message(crosscheck_report))
-        except Exception as exc:
-            stage = "Stage 2/3/4"
-            debug["errors"].append({"stage": stage, "error": str(exc), "tb": traceback.format_exc()})
-            status.update(label=f"{stage} failed", state="error")
-            st.error(f"{stage} failed: {exc}")
-            latency.total_ms = elapsed_ms(pipeline_started)
-            log_metrics(latency, where="app")
-            return None
-        finally:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+            except Exception as exc:
+                stage = "Stage 2/3/4"
+                debug["errors"].append({"stage": stage, "error": str(exc), "tb": traceback.format_exc()})
+                status.update(label=f"{stage} failed", state="error")
+                st.error(f"{stage} failed: {exc}")
+                latency.total_ms = elapsed_ms(pipeline_started)
+                log_metrics(latency, where="app")
+                return None
 
         latency.total_ms = elapsed_ms(pipeline_started)
         log_metrics(latency, where="app")
-        latency_payload = _latency_session_payload(latency)
-        st.session_state["latency"] = latency_payload
-        st.session_state["export"] = _build_export_payload(
-            scenario_title=expected_trace.scenario_title,
-            recording_filename=video_name,
-            original_audit_result=original_audit_result,
+        outcome = _present_evaluation(
+            recording=recording,
             expected_trace=expected_trace,
             observed_trace=observed_trace,
-            crosscheck_report=crosscheck_report,
-            latency_metrics=_latency_export_payload(latency),
-            stage3_mode=stage3_mode,
-            deterministic_stage3=deterministic_stage3,
-            assisted_stage3=assisted_stage3,
-            stage3_assist=stage3_assist,
-            stage3_token_usage=stage3_token_usage,
+            stage3=stage3,
+            stage4=stage4,
+            latency=latency,
         )
         status.update(label="Audit complete", state="complete", expanded=False)
 
-    return audit_result, expected_trace
+    return outcome
+
+
+_SAVED_STAGE_LABELS = {"stage2": "Stage 2 retry", "stage3": "Stage 3", "stage4": "Stage 4"}
+
+
+def _run_saved_stage(
+    store: RecordingStore,
+    recording_id: str,
+    *,
+    action: str,
+    stage2_version: int | None = None,
+    stage3_version: int | None = None,
+) -> tuple[AuditResult, ExpectedTrace] | None:
+    """Run one stage on a saved recording: ``stage2`` retry, ``stage3``, or ``stage4``.
+
+    Stage 3 uses ``stage2_version`` (latest when None); Stage 4 needs ``stage3_version``.
+    A Stage 2 retry shows no audit result, so it returns None.
+    """
+    label = _SAVED_STAGE_LABELS[action]
+    debug = _reset_run_state(STAGE3_MODE_EVIDENCE)
+    latency = LatencyMetrics()
+    started = monotonic_ms()
+    with st.status(f"Running {label} for {recording_id}…", expanded=True) as status:
+        try:
+            recording = store.load_manifest(recording_id)
+            expected_trace = store.load_stage1(recording_id).expected_trace
+            if action == "stage2":
+                _execute_stage2(store, recording_id, debug, latency)
+                status.update(label=f"{label} complete", state="complete", expanded=False)
+                return None
+            if action == "stage3":
+                stage3 = _execute_stage3(
+                    store,
+                    recording_id,
+                    Stage3Mode.evidence_aware,
+                    debug,
+                    stage2_version=stage2_version,
+                )
+                latency.stage3_ms = elapsed_ms(started)
+                stage4 = None
+            else:
+                if stage3_version is None:
+                    raise ValueError("Select a Stage 3 evaluation to cross-check")
+                stage3 = store.load_stage3(recording_id, stage3_version)
+                stage4 = _execute_stage4(store, recording_id, stage3_version, debug, latency)
+            observed_trace = store.load_stage2(
+                recording_id, stage3.inputs.stage2_version
+            ).observed_trace
+        except (MissingArtifactError, ArtifactIntegrityError, RecordingBusyError) as exc:
+            status.update(label=f"{label} cannot run", state="error")
+            st.error(f"{label} cannot run: {exc}")
+            return None
+        except Exception as exc:
+            debug["errors"].append({"stage": label, "error": str(exc), "tb": traceback.format_exc()})
+            status.update(label=f"{label} failed", state="error")
+            st.error(f"{label} failed: {exc}")
+            return None
+        latency.total_ms = elapsed_ms(started)
+        log_metrics(latency, where=f"app.{action}")
+        outcome = _present_evaluation(
+            recording=recording,
+            expected_trace=expected_trace,
+            observed_trace=observed_trace,
+            stage3=stage3,
+            stage4=stage4,
+            latency=latency,
+        )
+        status.update(label=f"{label} complete", state="complete", expanded=False)
+    return outcome
+
+
+# ── Saved recordings panel ────────────────────────────────────────────────────
+
+_PANEL_NOTICES_KEY = "saved_recordings_notices"
+_PANEL_PENDING_KEY = "saved_recordings_pending_selection"
+_SAVED_WORKSPACE_KEY = "saved_recordings_open"
+
+
+def _recording_label(recording: RecordingManifest) -> str:
+    created = recording.created_at.strftime("%Y-%m-%d %H:%M")
+    return f"{recording.recording_id}  ·  {recording.source_filename}  ·  {created} UTC"
+
+
+def _stage3_label(evaluation: Stage3Evaluation) -> str:
+    verdict = evaluation.result.verdict.value if evaluation.result is not None else "—"
+    return f"v{evaluation.version} · Stage 2 v{evaluation.inputs.stage2_version} · {verdict}"
+
+
+def _refresh_panel(selection: dict[str, int], notices: list[tuple[str, str]]) -> None:
+    """Rerun so the selectors list (and select) the version a run just saved.
+
+    Widget values can only be set before their widget is drawn, so the selection is
+    applied at the top of the next run; results stay in session state.
+    """
+    st.session_state[_PANEL_PENDING_KEY] = selection
+    st.session_state[_PANEL_NOTICES_KEY] = notices
+    st.rerun()
+
+
+def _render_recording_panel(store: RecordingStore) -> None:
+    """Pick a recording, its Stage 2 version and Stage 3 result; run Stage 3, Stage 4 or retry Stage 2."""
+    st.divider()
+    st.header("Saved Recordings")
+    recordings = store.list_recordings()
+    if not recordings:
+        st.info("No saved recordings yet. Run the full pipeline to create one.")
+        return
+
+    by_id = {recording.recording_id: recording for recording in recordings}
+    recording_id = st.selectbox(
+        "Recording",
+        list(by_id),
+        format_func=lambda rid: _recording_label(by_id[rid]),
+        key="selected_recording",
+    )
+    try:
+        store.recover_stale_runs(recording_id)
+    except RecordingBusyError:
+        logger.info("stale-run check skipped: %s is busy", recording_id)
+    for key, value in st.session_state.pop(_PANEL_PENDING_KEY, {}).items():
+        st.session_state[key] = value
+
+    has_stage1 = store.has_artifact(recording_id, STAGE1_FILENAME)
+    stage2_versions = store.stage2_versions(recording_id)
+    video_path = store.video_path(recording_id)
+    completed3 = {
+        item.version: item
+        for item in reversed(store.list_stage3(recording_id))
+        if item.status == RunStatus.completed
+    }
+    stage2_key = f"stage2_version_{recording_id}"
+    stage3_key = f"stage3_version_{recording_id}"
+
+    stage2_col, stage3_col = st.columns(2)
+    with stage2_col:
+        stage2_version = st.selectbox(
+            "Stage 2 version",
+            list(reversed(stage2_versions)),
+            format_func=lambda version: f"v{version}",
+            key=stage2_key,
+            help="The observed trace Run Stage 3 aligns against.",
+        ) if stage2_versions else None
+        if stage2_version is None:
+            st.caption("No Stage 2 extraction saved yet.")
+    with stage3_col:
+        stage3_version = st.selectbox(
+            "Stage 3 result",
+            list(completed3),
+            format_func=lambda version: _stage3_label(completed3[version]),
+            key=stage3_key,
+            help="The evaluation Run Stage 4 cross-checks.",
+        ) if completed3 else None
+        if stage3_version is None:
+            st.caption("No completed Stage 3 result yet.")
+
+    has_stage2c = stage2_version is not None and store.has_artifact(
+        recording_id, stage2c_filename(stage2_version)
+    )
+    has_stills = stage2_version is not None and bool(
+        store.load_stage2(recording_id, stage2_version).evidence_frames
+    )
+    frames_available = video_path is not None or has_stage2c or has_stills
+
+    run3_col, run4_col, retry2_col = st.columns(3)
+    with run3_col:
+        run3 = st.button(
+            "Run Stage 3",
+            disabled=not has_stage1 or stage2_version is None or not frames_available,
+            key="run_stage3",
+            help="Align the selected Stage 2 version and save a new Stage 3 result.",
+        )
+        if stage2_version is not None and not frames_available:
+            st.caption(
+                "Stage 3 evidence review needs frames: no video, no saved evidence stills "
+                "and no frozen Stage 2C for this Stage 2 version."
+            )
+    with run4_col:
+        run4 = st.button(
+            "Run Stage 4",
+            disabled=stage3_version is None or video_path is None,
+            key="run_stage4",
+            help="Cross-check the selected Stage 3 result.",
+        )
+        if video_path is None:
+            st.caption(
+                "Stage 4 needs the original video: it decodes frame windows around each "
+                "target, which saved evidence stills do not contain."
+            )
+    with retry2_col:
+        retry2 = st.button(
+            "Retry Stage 2",
+            disabled=not has_stage1 or video_path is None,
+            key="retry_stage2",
+            help="Extract again from the saved video into a new Stage 2 version; "
+            "earlier versions are kept.",
+        )
+        if video_path is None:
+            st.caption("Stage 2 retry needs the original video, which is not available.")
+
+    for kind, message in st.session_state.pop(_PANEL_NOTICES_KEY, []):
+        getattr(st, kind)(message)
+
+    if not (retry2 or run3 or run4):
+        return
+    st.session_state["result"] = None
+    st.session_state["latency"] = None
+    st.session_state["export"] = None
+    if retry2:
+        _run_saved_stage(store, recording_id, action="stage2")
+        added = sorted(set(store.stage2_versions(recording_id)) - set(stage2_versions))
+        if added:
+            _refresh_panel({stage2_key: added[-1]}, [("success", f"Saved Stage 2 v{added[-1]}.")])
+        return
+    if run3:
+        st.session_state["result"] = _run_saved_stage(
+            store, recording_id, action="stage3", stage2_version=stage2_version
+        )
+        added3 = [
+            item
+            for item in store.list_stage3(recording_id)
+            if item.status == RunStatus.completed and item.version not in completed3
+        ]
+        if added3:
+            latest = added3[-1]
+            notices = [("success", f"Saved Stage 3 v{latest.version} (Stage 2 v{latest.inputs.stage2_version}).")]
+            warning = _replay_warning(latest)
+            if warning is not None:
+                notices.append(("warning", warning))
+            _refresh_panel({stage3_key: latest.version}, notices)
+        return
+    if stage3_version is not None:
+        st.session_state["result"] = _run_saved_stage(
+            store, recording_id, action="stage4", stage3_version=stage3_version
+        )
 
 
 # ── App entry point ───────────────────────────────────────────────────────────
@@ -1206,10 +1491,22 @@ def main() -> None:
         "Verify that a UI test recording faithfully demonstrates its expected scenario. "
         "Stage 1 parses the scenario into a structured trace; Stage 2 extracts what "
         "actually happened in the video; Stage 3 aligns the two traces (deterministic by "
-        "default, with an optional experimental LLM-assisted mode)."
+        "default, with an optional evidence-aware agent review); Stage 4 cross-checks. "
+        "Every run is saved. Use Saved Recording re-runs Stage 2, Stage 3 and Stage 4 from one."
     )
 
     st.divider()
+
+    if st.session_state.get(_SAVED_WORKSPACE_KEY):
+        if st.button("Back", key="saved_recordings_back"):
+            st.session_state[_SAVED_WORKSPACE_KEY] = False
+            st.rerun()
+        _render_recording_panel(RecordingStore.from_env())
+        if st.session_state.get("result") is not None:
+            audit_result, expected_trace = st.session_state["result"]
+            _render_results(audit_result, expected_trace)
+        _render_debug_panel()
+        return
 
     # ── Inputs ────────────────────────────────────────────────────────────────
     left_col, right_col = st.columns(2, gap="large")
@@ -1221,7 +1518,7 @@ def main() -> None:
             type=["mp4", "mov", "avi", "webm"],
             max_upload_size=MAX_UPLOAD_SIZE_MB,
             help=(
-                "MP4 recommended. The recording is written to a temporary local file; "
+                "MP4 recommended. The recording is saved in its recording folder; "
                 "only extracted JPEG frames are sent through the OpenAI-compatible gateway."
             ),
             label_visibility="collapsed",
@@ -1247,20 +1544,19 @@ def main() -> None:
         "Stage 3 alignment mode",
         options=[
             STAGE3_MODE_DETERMINISTIC,
-            STAGE3_MODE_ASSISTED,
             STAGE3_MODE_EVIDENCE,
         ],
         index=0,
         horizontal=True,
         help=(
             "Deterministic (default) uses the existing align() path. "
-            f"LLM-assisted (experimental) calls align_with_assist() with "
-            f"{ALIGN_ASSIST_MODEL}; Claude proposes, Python validates before apply. "
-            "Evidence-aware also retrieves multi-observation windows for coarse steps, "
-            "asks Claude to label initiation/progress/completion/distractor roles, and "
-            "runs Stage 2C expected-guided frame evidence discovery (frame IDs only; "
-            "Python validates timestamps). Initiation alone never clears assertions. "
-            "Only accepted resolutions are excluded from Stage 4 semantic review."
+            "Evidence-aware runs the same deterministic base, then an agent review "
+            f"with {ALIGN_ASSIST_MODEL}: Claude proposes, Python validates before apply. "
+            "It retrieves multi-observation windows for coarse steps, asks Claude to "
+            "label initiation/progress/completion/distractor roles, and runs Stage 2C "
+            "expected-guided frame evidence discovery (frame IDs only; Python validates "
+            "timestamps). Initiation alone never clears assertions. Only accepted "
+            "resolutions are excluded from Stage 4 semantic review."
         ),
     )
 
@@ -1278,16 +1574,21 @@ def main() -> None:
 
     run_disabled = not (uploaded_file and scenario_text.strip())
     run_clicked = st.button(
-        "Run Audit",
+        "Run Full Pipeline",
         type="primary",
         disabled=run_disabled,
         use_container_width=False,
+        help="Extract a new video (Stages 1–2) and run the complete evaluation.",
     )
 
     # Persist results across rerenders so that expanding a finding or verdict
     # does not discard the current audit output.
     if "result" not in st.session_state:
         st.session_state["result"] = None
+
+    if st.button("Use Saved Recording", key="use_saved_recording"):
+        st.session_state[_SAVED_WORKSPACE_KEY] = True
+        st.rerun()
 
     if run_clicked and uploaded_file is not None and scenario_text.strip():
         # Clear any previous result before starting a fresh run.

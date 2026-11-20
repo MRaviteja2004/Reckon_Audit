@@ -221,6 +221,22 @@ def test_extract_observed_trace_merges_chunks_to_absolute_timestamps():
     assert [a.timestamp_ms for a in trace.actions] == [5000, 59_000]
 
 
+def test_extract_observed_trace_reports_split_seam_action_once():
+    def edge_click(*args: object, clip_offset_ms: int, clip_end_ms: int, **kwargs: object) -> ObservedTrace:
+        edge_ms = 0 if clip_offset_ms else clip_end_ms - clip_offset_ms
+        return _chunk(clip_offset_ms, clip_end_ms, [_observed_action(timestamp_ms=edge_ms)])
+
+    events = list(range(1000, 2 * MAX_WINDOW_MS, 1000))
+    with (
+        patch("reckon.sampler.detect_change_events", return_value=events),
+        patch("reckon.sampler.video_duration_ms", return_value=3 * MAX_WINDOW_MS),
+        patch("reckon.sampler.extract_window", side_effect=edge_click) as mock_extract,
+    ):
+        trace = extract_observed_trace(MagicMock(), _VIDEO, _SOURCE)
+    assert mock_extract.call_count == 3
+    assert len(trace.actions) == 2
+
+
 def test_extract_observed_trace_clamps_windows_to_video_duration():
     with (
         patch("reckon.sampler.detect_change_events", return_value=[9500]),

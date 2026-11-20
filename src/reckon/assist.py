@@ -26,34 +26,38 @@ resolutions only (LLM confidence >= 0.85, or deterministic validation).
 """
 
 import logging
+from pathlib import Path
 
 import instructor
 import openai
 from instructor.core import InstructorRetryException
 from pydantic import ValidationError
 
-from pathlib import Path
-
 from reckon.aligner import align
 from reckon.assist_apply import apply_assist_proposals
 from reckon.assist_evidence import run_evidence_assist
 from reckon.assist_propose import ALIGN_ASSIST_MODEL, propose_assist_batch
 from reckon.assist_select import AssistCandidate, select_assist_candidates
-from reckon.assist_validate import validate_assist_decision, validate_deterministic_delayed
+from reckon.assist_validate import (
+    validate_assist_decision,
+    validate_deterministic_delayed,
+)
 from reckon.episode_verifier import verify_trace_against_episodes
 from reckon.episodes import cluster_observed_episodes
+from reckon.frame_candidate_fallback import fallback_to_frame_candidates
 from reckon.latency import elapsed_ms, monotonic_ms
 from reckon.parser import make_openai_client
+from reckon.proposal_selection import settle_proposals, steps_with_standing_proposal
 from reckon.retry import RetryCallback
 from reckon.schema import (
     AssistCandidateKind,
+    AssistedAlignResult,
     AssistMatchMethod,
     AssistMetrics,
     AssistProposalRecord,
     AssistProposalStatus,
     AssistReport,
     AssistReviewedPair,
-    AssistedAlignResult,
     CandidateEvidenceTrace,
     ExpectedTrace,
     FrameManifest,
@@ -268,9 +272,15 @@ def align_with_assist(
         for record in episode_proposals
         if record.status == AssistProposalStatus.accepted
     }
+    # Ownership can still demote an accepted episode proposal; only the ones that
+    # stand shadow what later stages found for the same step.
+    episode_standing_steps = steps_with_standing_proposal(
+        deterministic, expected, episode_proposals
+    )
 
-    # Classic assist runs against the deterministic baseline. Steps already proven
-    # by episode verification are skipped to avoid conflicting remaps.
+    # Classic assist runs against the deterministic baseline. Steps accepted by
+    # episode verification are not sent to the model again, so no extra call is made
+    # for a step whose episode proposal later loses ownership.
     candidates = [
         candidate
         for candidate in select_assist_candidates(expected, observed, deterministic)
@@ -350,12 +360,12 @@ def align_with_assist(
         evidence_candidates = [
             candidate
             for candidate in ev_candidates
-            if candidate.expected_step_index not in episode_accepted_steps
+            if candidate.expected_step_index not in episode_standing_steps
         ]
         proposals.extend(
             proposal
             for proposal in ev_proposals
-            if proposal.expected_step_index not in episode_accepted_steps
+            if proposal.expected_step_index not in episode_standing_steps
         )
         llm_request_count += ev_requests
         llm_ms += ev_ms
@@ -410,17 +420,11 @@ def align_with_assist(
             stage2c_proposals = proposals_from_candidate_trace(
                 candidate_evidence, expected
             )
-            # Skip steps already recovered earlier in this assist pass.
-            recovered = {
-                p.expected_step_index
-                for p in proposals
-                if p.status == AssistProposalStatus.accepted
-            }
+            # Skip steps already recovered earlier in this assist pass. A proposal that
+            # lost its observation to another step recovered nothing.
+            recovered = steps_with_standing_proposal(deterministic, expected, proposals)
             stage2c_proposals = [
-                p
-                for p in stage2c_proposals
-                if p.expected_step_index not in recovered
-                and p.expected_step_index not in episode_accepted_steps
+                p for p in stage2c_proposals if p.expected_step_index not in recovered
             ]
             proposals.extend(stage2c_proposals)
             stage2c_candidate_count = len(stage2c_proposals)
@@ -462,17 +466,20 @@ def align_with_assist(
             ),
         )
 
-    base_committed = {
-        decision.expected_step_index
-        for decision in deterministic.equivalence_decisions
-        if decision.status == "committed" or decision.agent_status == "committed"
-    }
-    accepted = [
-        proposal
-        for proposal in proposals
-        if proposal.status == AssistProposalStatus.accepted
-        and proposal.expected_step_index not in base_committed
-    ]
+    # A proposal can take an observation another step was going to pass on, or
+    # lose one, while a validated Stage 2C candidate for that evidence already
+    # exists. Reconsider it with the same checks. This does not call a model.
+    originals = list(proposals)
+    proposals, accepted = settle_proposals(deterministic, expected, proposals)
+    proposals, accepted = fallback_to_frame_candidates(
+        deterministic,
+        expected,
+        observed,
+        originals,
+        proposals,
+        accepted,
+        candidate_evidence,
+    )
     try:
         refined = (
             apply_assist_proposals(deterministic, accepted, expected, observed)

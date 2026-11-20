@@ -77,6 +77,13 @@ _GENERIC_ASSERTION_TARGETS = frozenset({
     "window",
 })
 
+# Which generic targets name the same kind of region: a message shown to the user, or
+# the surface it appears on.
+_GENERIC_REGION_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"message", "banner", "toast", "notification", "confirmation"}),
+    frozenset({"app", "screen", "page", "ui", "view", "window"}),
+)
+
 # Legitimate component-role aliases (carousel ↔ slider, sheet ↔ drawer, …).
 _ASSERTION_TARGET_ALIAS_GROUPS: tuple[frozenset[str], ...] = (
     frozenset({"carousel", "slider", "pager", "gallery"}),
@@ -268,8 +275,9 @@ def _contains_assertion(assertion: str, evidence: str) -> bool:
     return all(available.get(token, 0) >= count for token, count in required.items())
 
 
-# Click/select interchange is opt-in for choice controls only (assist remapping).
-# Baseline align() must not treat them as interchangeable by default.
+# Click/select interchange is opt-in for choice controls only.
+# The default stays strict. Baseline align() does not use this regex as proof
+# of identity; its select path checks the control's head noun and tokens.
 _CHOICE_CONTROL_ACTIONS: frozenset[ActionType] = frozenset(
     {ActionType.click, ActionType.select}
 )
@@ -305,10 +313,11 @@ def actions_compatible(
     Identical types are always compatible. The assertion family is treated as
     internally interchangeable; see ASSERTION_ACTIONS.
 
-    Click ↔ select is NOT allowed by default (baseline DP must stay strict).
-    Opt in with ``allow_choice_control=True`` only when *both* targets denote
-    choice controls (checkbox / radio / switch / dropdown). A bare ``select``
-    must never remap onto a standard button click.
+    Click ↔ select is not allowed unless ``allow_choice_control`` is set.
+    Opt in only when *both* targets denote choice controls (checkbox / radio /
+    switch / dropdown). This function does not decide that they are the same
+    control; the caller still has to check identity. A bare ``select`` must
+    never match a standard button click.
     """
     if exp_action == obs_action:
         return True
@@ -453,9 +462,44 @@ def assertion_screen_compatible(
     )
 
 
+def assertion_target_corroborated(
+    expected_target: str | None,
+    obs: ObservedAction,
+) -> bool:
+    """True when the observation is plainly about what the expected target names.
+
+    A distinct target must be carried word for word by the observation's own
+    context; fuzzy similarity alone is never enough. A generic target ("message")
+    names only a kind of region, so it corroborates just an observation naming the
+    same kind ("banner"). An absent target corroborates nothing.
+    """
+    if expected_target is None:
+        return False
+    expected_tokens = _assertion_meaning_tokens(expected_target)
+    if not expected_tokens:
+        return False
+    if all(token in _GENERIC_ASSERTION_TARGETS for token in expected_tokens):
+        return _names_same_generic_region(expected_tokens, obs.target)
+    return assertion_target_relevant(
+        expected_target, obs, trust_target_similarity=False
+    )
+
+
+def _names_same_generic_region(expected_tokens: list[str], observed_target: str | None) -> bool:
+    if not observed_target:
+        return False
+    observed_tokens = set(_assertion_meaning_tokens(observed_target))
+    return any(
+        family & set(expected_tokens) and family & observed_tokens
+        for family in _GENERIC_REGION_FAMILIES
+    )
+
+
 def assertion_target_relevant(
     expected_target: str | None,
     obs: ObservedAction,
+    *,
+    trust_target_similarity: bool = True,
 ) -> bool:
     """Require a distinct expected assertion target to match the observed UI context.
 
@@ -478,7 +522,7 @@ def assertion_target_relevant(
     if assertion_roles_conflict_with_observation(expected_target, obs):
         return False
 
-    if obs.target is not None:
+    if trust_target_similarity and obs.target is not None:
         if _assertion_target_similarity(expected_target, obs.target) >= FUZZY_THRESHOLD:
             return True
 
@@ -527,6 +571,9 @@ def assertion_target_relevant(
 
 # Surface nouns that mark an expected target as a named screen identity.
 _SCREEN_SURFACE_TOKENS = frozenset({"screen", "page", "view", "dashboard"})
+# Surface nouns that name no particular screen. Any other surface noun is part of
+# the claim: "GitHub dashboard" is not proved by any GitHub page.
+_GENERIC_SURFACE_TOKENS = frozenset({"screen", "page", "view"})
 
 # Landing / arrival cues required before screen-identity may replace full
 # assertion token containment (avoids "X passed successfully" false passes).
@@ -575,36 +622,53 @@ def _is_screen_landing_assertion(
     return all(token in assertion_tokens for token in identity)
 
 
-def _screen_identity_supported_by_observation(
-    identity: list[str],
-    obs: ObservedAction,
-) -> bool:
-    """True when structured observation text names the expected screen identity.
+def _distinct_surface_tokens(expected_target: str) -> list[str]:
+    """Surface nouns in the target that the screen itself has to show."""
+    return sorted(
+        _raw_target_tokens(expected_target)
+        & (_SCREEN_SURFACE_TOKENS - _GENERIC_SURFACE_TOKENS)
+    )
 
-    Multi-token identities (e.g. Background check) may appear across target,
-    visible_text, description, or screen_description. A single-token identity
-    (e.g. Hub) must appear in the observed target itself so ambient copy cannot
-    prove the wrong screen.
-    """
-    if not identity:
-        return False
-    if len(identity) == 1:
-        if not obs.target:
-            return False
-        return identity[0] in set(
-            _canonicalise_target_tokens(_assertion_meaning_tokens(obs.target))
-        )
 
-    parts = [obs.target or "", obs.screen_description or ""]
-    if obs.assertion_evidence is not None:
-        parts.append(obs.assertion_evidence.visible_text or "")
-        parts.append(obs.assertion_evidence.description or "")
-    blob_tokens = set(
+def _proof_tokens(*texts: str | None) -> set[str]:
+    return set(
         _canonicalise_target_tokens(
-            re.findall(r"[a-z0-9]+", " ".join(parts).lower())
+            re.findall(r"[a-z0-9]+", " ".join(text for text in texts if text).lower())
         )
     )
-    return all(token in blob_tokens for token in identity)
+
+
+def _screen_identity_supported_by_observation(
+    expected_target: str,
+    obs: ObservedAction,
+    context_target: str | None,
+) -> bool:
+    """True when recorded text, not a model description, shows the expected screen.
+
+    The screen has to carry visible text. Surface nouns that name a particular
+    screen (dashboard) must be on it. Identity may also come from the target, or
+    from ``context_target``, the URL of the navigation that opened the screen.
+    At least one identity token must be in a target, and a single-token identity
+    (e.g. Hub) entirely so, so ambient copy cannot prove the wrong screen.
+    """
+    identity = _screen_identity_tokens(expected_target)
+    evidence = obs.assertion_evidence
+    if not identity or evidence is None or not evidence.visible_text:
+        return False
+    if assertion_roles_conflict_with_observation(expected_target, obs):
+        return False
+    shown = _proof_tokens(evidence.visible_text, obs.target)
+    if not all(token in shown for token in _distinct_surface_tokens(expected_target)):
+        return False
+    targets = _proof_tokens(
+        " ".join(_assertion_meaning_tokens(obs.target or "")),
+        context_target,
+    )
+    if not any(token in targets for token in identity):
+        return False
+    if len(identity) == 1:
+        return True
+    return all(token in shown | targets for token in identity)
 
 
 def assertion_satisfied(
@@ -612,6 +676,7 @@ def assertion_satisfied(
     obs: ObservedAction,
     *,
     expected_target: str | None = None,
+    context_target: str | None = None,
 ) -> bool:
     """Return True when the observed action provides evidence for the assertion.
 
@@ -625,16 +690,13 @@ def assertion_satisfied(
     required before text containment can establish a pass.
 
     Narrow exception: a land-on-screen assertion whose expected target names that
-    screen may also pass when structured screen-identity evidence agrees, without
-    requiring boilerplate words like "user should land on" to appear in the OCR.
-    Navigate / screen-change observations may supply that identity via target or
-    screen_description even when Stage 2 omitted ``assertion_evidence``.
+    screen may also pass when the screen's visible text and target show it,
+    without requiring boilerplate words like "user should land on" to appear in
+    the OCR. ``context_target`` is the URL of the navigation that opened the
+    screen; it may supply the screen's identity but never its visible text.
     """
-    if not assertion_target_relevant(expected_target, obs):
-        return False
-
     evidence = obs.assertion_evidence
-    if evidence is not None:
+    if evidence is not None and assertion_target_relevant(expected_target, obs):
         for text in (evidence.visible_text, evidence.description):
             if not text:
                 continue
@@ -643,17 +705,14 @@ def assertion_satisfied(
             if _contains_assertion(assertion, text):
                 return True
 
-    # Screen-landing path: identity tokens only, after target relevance + polarity.
-    # Without assertion_evidence, only passive/navigate observations may prove a
-    # land-on-screen claim. A click/type/select is the action that *opens* a page,
-    # not evidence the page is displayed — that belongs to the action step.
-    if not _is_screen_landing_assertion(assertion, expected_target):
-        return False
-    if evidence is None and obs.action not in (
-        ASSERTION_ACTIONS | {ActionType.navigate, ActionType.other}
+    # Screen-landing path: identity tokens only, after polarity. A URL or a model's
+    # screen description says where the browser went, not what rendered there, so
+    # the screen must also carry visible text. Its identity check replaces target
+    # relevance, which reads model descriptions and never visible text.
+    if expected_target is None or not _is_screen_landing_assertion(
+        assertion, expected_target
     ):
         return False
-    identity = _screen_identity_tokens(expected_target or "")
     polarity_texts = [
         text
         for text in (
@@ -661,12 +720,15 @@ def assertion_satisfied(
             evidence.description if evidence is not None else None,
             obs.screen_description,
             obs.target,
+            context_target,
         )
         if text
     ]
     if any(_introduces_negation(assertion, text) for text in polarity_texts):
         return False
-    return _screen_identity_supported_by_observation(identity, obs)
+    return _screen_identity_supported_by_observation(
+        expected_target, obs, context_target
+    )
 
 
 def focus_click_evidence(

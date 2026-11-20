@@ -16,7 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from eval.schema import CaseTruth
 from reckon.aligner import align
 from reckon.parser import parse_scenario
-from reckon.schema import ExpectedTrace, FindingType, ObservedTrace
+from reckon.schema import ExpectedTrace, ObservedTrace
 
 
 ALIGNER_EVAL_DIR = PROJECT_ROOT / "eval" / "aligner"

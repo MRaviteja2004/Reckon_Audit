@@ -1,6 +1,5 @@
 # Environment & secrets
 .env
-aligner_assist/
 aligner_evidence/
 .tmp_austin_macros/
 
@@ -18,6 +17,7 @@ build/
 
 # Media / uploads (potentially large or sensitive)
 uploads/
+recordings/
 *.mp4
 *.mov
 *.avi

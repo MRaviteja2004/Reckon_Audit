@@ -14,6 +14,12 @@ from collections.abc import Mapping
 
 from rapidfuzz import fuzz
 
+from reckon.auth_cta import (
+    AUTH_CTA_RECOVERY_REASON,
+    auth_cta_canonical,
+    find_auth_cta_synonym_match,
+)
+from reckon.authentication_intent import claims_authentication
 from reckon.schema import (
     ActionType,
     AssistCandidateKind,
@@ -38,11 +44,6 @@ from reckon.tolerance import (
     is_choice_control_target,
     values_equivalent,
     verdict_for,
-)
-from reckon.auth_cta import (
-    AUTH_CTA_RECOVERY_REASON,
-    auth_cta_canonical,
-    find_auth_cta_synonym_match,
 )
 from reckon.typeahead import find_typeahead_selection_proof
 
@@ -190,6 +191,8 @@ def _is_app_launch_expectation(
     remains unrecovered initiation for coarse-login evidence cases.
     """
     if step.action != ActionType.other or not step.target:
+        return False
+    if claims_authentication(step):
         return False
     if not _APP_LAUNCH_TARGET_RE.search(step.target):
         return False
